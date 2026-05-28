@@ -1,0 +1,2652 @@
+#!/bin/bash
+set +m # Disable bash job control messages to prevent script code from bleeding into the terminal on abort
+
+# ==============================================================================
+# ⚙️  CONFIG LOADER
+# Reads ~/.config/stacks/stacks.conf if it exists.
+# Falls back to built-in defaults if not found.
+# ==============================================================================
+STACKS_CONF="~/.config/stacks/stacks.conf"
+
+# ── Built-in defaults ──────────────────────────────────────────────────────────
+STACKS_DIR="/srv/stacks/Stacks"
+STACKS=(core_0 core_1 core_2 core_3 net_2 net_0 db_0 db_1 db_2 db_3 db_4 db_5 db_6 net_1 net_3 ai_0 ai_1 ai_2 ai_3 srvs_0 srvs_1 srvs_2 dev_0 dev_1 dev_2 dev_3 dev_4 data_0 data_1)
+DELAY=15
+DOMAINS=("auth.example.com" "opnsense.example.com" "traefik.example.com")
+INFO_LOG="/srv/stacks/stacks_info_details.log"
+FAILED_IMAGES_LOG="/tmp/stacks-failed-images-$(id -u).txt"
+# (set via config)
+# (set via config)
+PRIMARY_NETWORK="apartment_net"
+PRIMARY_SUBNET="172.20.0"
+DOMAIN="example.com"
+
+# ── Load config if it exists ───────────────────────────────────────────────────
+if [ -f "$STACKS_CONF" ]; then
+  source "$STACKS_CONF"
+fi
+
+export COMPOSE_PROGRESS=plain
+export DOCKER_CLI_HINTS=false
+export DOCKER_CLIENT_TIMEOUT=120
+export COMPOSE_HTTP_TIMEOUT=120
+
+# ==============================================================================
+# 🛑 COMMAND & DYNAMIC ARGUMENT PARSER
+# ==============================================================================
+COMMAND=""
+DO_RECREATE=0
+DO_CONTINUE=0
+ONLY_THIS_STACK=0
+DO_REPAIR=0
+DO_FIX=0
+# Persistent Custom Rearrange Configuration Loader
+CONFIG_FILE="/etc/stacks.conf"
+CUSTOM_REARRANGE=1
+if [ -f "$CONFIG_FILE" ]; then
+  source "$CONFIG_FILE"
+fi
+DO_RESTORE=0
+DO_DETACH=0
+DO_ATTACH=0
+DO_RESTART=0
+DO_INFO=0
+DO_CLEAN=0
+DO_FORCE=0
+TARGET_ARGS=()
+TARGET_END_SERVICE=""
+CONTINUE_COUNT=-1
+
+for arg in "$@"; do
+  # Catch the primary action command first
+  if [ -z "$COMMAND" ] && [[ "${arg,,}" =~ ^(up|down|start|stop|restart|rm|snapshot|get|kill|ls|status|logs|inspect|pull|build|volume|network|dynamics|reload|clean|search|regsearch|inject|strip|art|backup|describe|gen|fix|custom)$ ]]; then
+     COMMAND="${arg,,}"
+     continue
+  fi
+  
+  case "${arg,,}" in
+    recreate) DO_RECREATE=1 ;;
+    restart) DO_RESTART=1 ;;
+    continue|contenu|contentue|contenue) DO_CONTINUE=1 ;;
+    just|only|solo|single) ONLY_THIS_STACK=1 ;;
+    repair|repaire) DO_REPAIR=1; DO_FIX=1 ;;
+    fix) DO_REPAIR=1; DO_FIX=1 ;;
+    no-fix) DO_REPAIR=1; DO_FIX=0 ;;
+    restore) DO_RESTORE=1 ;;
+    detach|d) DO_DETACH=1 ;;
+    attach|a) DO_ATTACH=1 ;;
+    info|i) DO_INFO=1 ;;
+    clean) DO_CLEAN=1 ;;
+    force) DO_FORCE=1 ;;
+    *) TARGET_ARGS+=("$arg") ;;
+  esac
+done
+
+if [ -z "$COMMAND" ]; then
+  echo -e "\e[1;31m✘ Error: You must specify an action.\e[0m"
+  echo -e "\e[1;33mUsage: stacks [up|down|start|stop|restart|rm] [flags] [targets]\e[0m"
+  exit 1
+fi
+
+LOG_FILE="/srv/stacks/stacks_${COMMAND}.log"
+
+CUSTOM_STACKS=()
+CUSTOM_SERVICES=()
+TARGET_STACK=""
+TARGET_SERVICE=""
+
+PARSED_STACKS=()
+PARSED_SERVICES=()
+
+idx=0
+if [ "$COMMAND" == "snapshot" ]; then idx=99999; fi
+while [ $idx -lt ${#TARGET_ARGS[@]} ]; do
+  current_token="${TARGET_ARGS[$idx]}"
+  clean_stack="${current_token//_/-}"
+  
+  _is_stack=0
+  _actual_stack="$current_token"
+  if [ -f "$STACKS_DIR/$current_token.yml" ]; then
+    _is_stack=1
+  elif [ -f "$STACKS_DIR/$clean_stack.yml" ]; then
+    _is_stack=1
+    _actual_stack="$clean_stack"
+  elif [ -f "$STACKS_DIR/${current_token//-/_}.yml" ]; then
+    _is_stack=1
+    _actual_stack="${current_token//-/_}"
+  fi
+  
+  if [ $_is_stack -eq 1 ]; then
+    next_idx=$((idx + 1))
+    if [ $next_idx -lt ${#TARGET_ARGS[@]} ]; then
+      next_token="${TARGET_ARGS[$next_idx]}"
+      clean_next="${next_token//_/-}"
+      
+      _next_is_stack=0
+      if [ -f "$STACKS_DIR/$next_token.yml" ] || [ -f "$STACKS_DIR/$clean_next.yml" ] || [ -f "$STACKS_DIR/${next_token//-/_}.yml" ]; then
+        _next_is_stack=1
+      fi
+      
+      if [ $_next_is_stack -eq 0 ]; then
+        PARSED_STACKS+=("$_actual_stack")
+        _matched_svc="$next_token"
+        _next_hyphen="${next_token//_/-}"
+        _next_under="${next_token//-/_}"
+        if awk '/^services:/{flag=1; next} /^[a-z]/{flag=0} flag && /^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/, ""); print}' "$STACKS_DIR/$_actual_stack.yml" 2>/dev/null | grep -qx "$_next_hyphen"; then
+          _matched_svc="$_next_hyphen"
+        elif awk '/^services:/{flag=1; next} /^[a-z]/{flag=0} flag && /^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/, ""); print}' "$STACKS_DIR/$_actual_stack.yml" 2>/dev/null | grep -qx "$_next_under"; then
+          _matched_svc="$_next_under"
+        fi
+        _peek_idx=$((next_idx + 1))
+        if [ $_peek_idx -lt ${#TARGET_ARGS[@]} ]; then
+          _peek="${TARGET_ARGS[$_peek_idx]}"
+          if [[ "$_peek" =~ ^[0-9]+$ ]]; then
+            CONTINUE_COUNT="$_peek"; PARSED_SERVICES+=("$_matched_svc"); idx=$((idx + 3)); continue
+          fi
+          _pk_h="${_peek//_/-}"; _pk_u="${_peek//-/_}"
+          if awk '/^services:/{flag=1;next}/^[a-z]/{flag=0}flag&&/^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/,"");print}' "$STACKS_DIR/$_actual_stack.yml" 2>/dev/null | grep -qx "$_pk_h"; then
+            TARGET_END_SERVICE="$_pk_h"; PARSED_SERVICES+=("$_matched_svc"); idx=$((idx + 3)); continue
+          elif awk '/^services:/{flag=1;next}/^[a-z]/{flag=0}flag&&/^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/,"");print}' "$STACKS_DIR/$_actual_stack.yml" 2>/dev/null | grep -qx "$_pk_u"; then
+            TARGET_END_SERVICE="$_pk_u"; PARSED_SERVICES+=("$_matched_svc"); idx=$((idx + 3)); continue
+          fi
+        fi
+        PARSED_SERVICES+=("$_matched_svc")
+        idx=$((idx + 2))
+        continue
+      fi
+    fi
+    PARSED_STACKS+=("$_actual_stack")
+    PARSED_SERVICES+=("")
+    idx=$((idx + 1))
+  else
+    PARSED_STACKS+=("$current_token")
+    PARSED_SERVICES+=("")
+    idx=$((idx + 1))
+  fi
+done
+
+if [ ${#PARSED_STACKS[@]} -eq 1 ]; then
+  TARGET_STACK="${PARSED_STACKS[0]}"
+  TARGET_SERVICE="${PARSED_SERVICES[0]}"
+elif [ ${#PARSED_STACKS[@]} -gt 1 ]; then
+  CUSTOM_STACKS=("${PARSED_STACKS[@]}")
+  CUSTOM_SERVICES=("${PARSED_SERVICES[@]}")
+fi
+
+# ==============================================================================
+# ATTACH & DETACH LOGIC
+# ==============================================================================
+if [ "$DO_ATTACH" -eq 1 ]; then
+  if [ -f "$LOG_FILE" ]; then
+    printf "\e[?25h"
+    echo -e "\e[1;34m▶ Attaching to background sequence...\e[0m"
+    echo -e "\e[1;33m(Press CTRL+C to detach view. The sequence will safely continue in the background)\e[0m"
+    echo -e "\e[1;36m--------------------------------------------------------------------------------\e[0m"
+    tail -f "$LOG_FILE"
+    exit 0
+  else
+    printf "\e[?25h"
+    echo -e "\e[1;31m✘ No active background sequence found.\e[0m"
+    exit 1
+  fi
+fi
+
+if [ -n "$TARGET_STACK" ] && [ ! -f "$STACKS_DIR/$TARGET_STACK.yml" ] && [[ ! "$COMMAND" =~ ^(regsearch|get|kill|status|ls|clean|reload|search|build|pull|logs|inspect|volume|network|dynamics|inject|strip|art|backup|gen|fix)$ ]]; then
+  printf "\e[?25h"
+  echo -e "\e[1;31m✘ Error: Stack $TARGET_STACK.yml not found in $STACKS_DIR\e[0m"
+  exit 1
+fi
+
+if [ "$DO_DETACH" -eq 1 ] && [ -z "$_IS_DETACHED" ]; then
+  printf "\e[?25h"
+  echo -e "\e[1;34m▶ Detaching sequence to run in background...\e[0m"
+  echo -e "\e[1;32m✔ Use 'stacks $COMMAND attach' to view progress live.\e[0m"
+  export _IS_DETACHED=1
+  nohup "$0" "$@" > "$LOG_FILE" 2>&1 &
+  exit 0
+fi
+
+# ==============================================================================
+# TIMESTAMP LOGGING HELPER
+# ==============================================================================
+log_output() {
+  awk '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush() }' >> "$LOG_FILE"
+}
+
+# ==============================================================================
+# 🎨 HEADER & STYLING
+# ==============================================================================
+show_header() {
+  printf "\e[?25l"
+  echo "=== Sequence Started: $(date) [$COMMAND] ===" > "$LOG_FILE"
+  > "$INFO_LOG"
+  > "$FAILED_IMAGES_LOG"
+}
+
+# ==============================================================================
+# 📊 UI ENGINE
+# ==============================================================================
+CURRENT_PERCENT=0
+CURRENT_ACTION="Initializing..."
+CURRENT_STACK="None"
+CURRENT_SERVICE="All"
+
+init_ui() {
+  stty -echo 2>/dev/null
+  trap 'stty echo 2>/dev/null; printf "\e[?25h"' EXIT
+
+  if [ "$COMMAND" != "build" ]; then
+    echo -e "\e[38;5;81m"
+    echo -e "  ____  _____  _    ____ _  _______ "
+    echo -e " / ___||_   _|/ \\  / ___| |/ /  ___|"
+    echo -e " \\___ \\  | | / _ \\| |   | \' /|___ \\"
+    echo -e "  ___) | | |/ ___ \\ |___| . \\ ___) |"
+    echo -e " |____/  |_/_/   \\_\\____|_|\\_\\____/ \e[0m"
+    echo ""
+  fi
+
+  echo ""
+  echo ""
+  echo ""
+  printf "\033[3A"
+}
+
+clear_ui() {
+  printf "\r\033[K\n\r\033[K\n\r\033[K\n\r\033[K\r\033[3A"
+}
+
+update_ui() {
+  CURRENT_ACTION="$1"
+  local percent=$2
+  if [ "$percent" -gt 100 ]; then percent=100; fi
+  CURRENT_PERCENT=$percent
+
+  local cols=80
+  local bar_width=36
+  local filled=$(( (percent * bar_width) / 100 ))
+  local empty=$(( bar_width - filled - 1 ))
+  if [ $empty -lt 0 ]; then empty=0; fi
+
+  # ── STACKS LOADING BAR ──────────────────────────────
+  local spin_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+  local spin_idx=$(( SECONDS % 10 ))
+  local spinner=$(echo "$spin_chars" | cut -c$((spin_idx+1)))
+
+  local current_bar=$(printf "%${filled}s" | tr " " "#")
+  local current_space=$(printf "%${empty}s" | tr " " "-")
+
+  local target_str="📦 ${CURRENT_STACK} | ⚙️  ${CURRENT_SERVICE:0:35}"
+  local action_str="  ${spinner} ${CURRENT_ACTION}"
+  local bar_str="  [${current_bar}>${current_space}] ${percent}%"
+
+  printf "\e[?7l\r\033[K\e[38;5;81m%s\e[0m\n\r\033[K\e[38;5;75m%s\e[0m\n\r\033[K\e[38;5;39m%s\e[0m\n\r\033[K\e[38;5;245m  🛑 Press Ctrl+C to cancel.\e[0m\e[?7h\033[3A" \
+         "${target_str:0:78}" "${action_str:0:78}" "${bar_str:0:78}"
+}
+
+safe_echo() {
+  clear_ui
+  echo -e "$1"
+  init_ui
+  update_ui "$CURRENT_ACTION" "$CURRENT_PERCENT"
+}
+
+# ==============================================================================
+# 🛑 ABORT LISTENER & WAIT
+# ==============================================================================
+abort_sequence() {
+  trap - INT TERM # Disable trap to prevent recursive looping
+  exec 2>/dev/null # Permanently mute stderr for this shell so Bash doesn't print broken pipeline source code
+  stty echo
+  printf "\e[?25h"
+  clear_ui
+  echo -e "\e[1;31m🛑 ABORTED: Sequence canceled. Returning to prompt...\e[0m"
+  rm -f /var/run/docker-manual-stop 2>/dev/null || true
+  pkill -P $$ # Safely kill active child processes
+  exit 130
+}
+
+trap 'abort_sequence' INT TERM
+
+smart_wait() {
+  local seconds=$1
+  for ((i=seconds; i>0; i--)); do
+    update_ui "Waiting ${i}s..." "$CURRENT_PERCENT"
+    if false; then # disabled for headless mode
+      if [[ "${key,,}" == "q" ]] || [[ "$key" == $'\e' ]]; then
+        while read -r -s -n 1 -t 0.1 _discard < /dev/tty 2>/dev/null; do :; done
+        kill -TERM $$ 2>/dev/null
+        exit 1
+      fi
+    fi
+  done
+}
+
+# ==============================================================================
+# SYSTEM FUNCTIONS
+# ==============================================================================
+UP_BASE_ARGS="--remove-orphans"
+
+run_live_cmd() {
+  local base_action="$1"
+  local pct="$2"
+  shift 2
+  
+  if [ "$DO_INFO" -eq 1 ]; then
+    "$@" 2>&1 | tr '\r' '\n' | awk -v logfile="$LOG_FILE" '{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0 >> logfile; fflush(logfile); print $0; fflush() }' | while IFS= read -r line; do
+      if false; then # disabled for headless mode
+        if [[ "${key,,}" == "q" ]] || [[ "$key" == $'\e' ]]; then
+          while read -t 0.01 -s -n 1 _discard < /dev/tty 2>/dev/null; do :; done
+          kill -TERM $$ 2>/dev/null
+          exit 1
+        fi
+      fi
+      local clean=$(echo "$line" | sed -E 's/\x1b\[[0-9;]*[a-zA-ZK]//g' | sed 's/^[ \t]*//')
+      if echo "$clean" | grep -qiE "Pulling|Downloading|Extracting|Pulled|Creating|Starting|Started|Waiting|Error|failed|MB"; then
+        local short_line=$(echo "$clean" | cut -c 1-45)
+        update_ui "$base_action ➜ $short_line" "$pct"
+      fi
+    done
+    return ${PIPESTATUS[0]}
+  else
+    "$@" 2>&1 | tr "\r" "\n" | while IFS= read -r line; do
+      echo "$line" >> "$LOG_FILE" 2>/dev/null || true
+      local clean=$(echo "$line" | sed -E "s/\[[0-9;]*[a-zA-ZK]//g" | sed "s/^[a-f0-9]*\s*//" | sed "s/^[ 	]*//")
+      if echo "$clean" | grep -qiE "Downloading|Pulling|Extracting|MB|kB|B/s"; then
+        local dl=$(echo "$clean" | grep -oE "[0-9]+\.?[0-9]*\s*(MB|kB|GB|B)/s" | tail -1)
+        local sz=$(echo "$clean" | grep -oE "[0-9]+\.?[0-9]*\s*(MB|kB|GB|B)" | tail -1)
+        local msg="$base_action"
+        [ -n "$sz" ] && msg="$msg ➜ $sz"
+        [ -n "$dl" ] && msg="$msg @ $dl"
+        update_ui "$msg" "$pct"
+      fi
+    done
+    return ${PIPESTATUS[0]}
+  fi
+}
+
+show_final_summary() {
+  local total_containers=$(command docker ps -aq | wc -l)
+  local running_containers=$(command docker ps -q | wc -l)
+  local inactive_containers=$((total_containers - running_containers))
+
+  echo -e "\n\e[1;36m┌──────────────────────────────────────────────────────┐\e[0m"
+  echo -e "\e[1;36m│\e[0m  \e[1;35m📊 INFRASTRUCTURE SUMMARY\e[0m                           \e[1;36m│\e[0m"
+  echo -e "\e[1;36m├──────────────────────────────────────────────────────┤\e[0m"
+  echo -e "\e[1;36m│\e[0m  \e[1;34mTotal Containers:\e[0m    $total_containers                            \e[1;36m│\e[0m"
+  echo -e "\e[1;36m│\e[0m  \e[1;32mRunning Containers:\e[0m  $running_containers                             \e[1;36m│\e[0m"
+  echo -e "\e[1;36m│\e[0m  \e[1;31mInactive Containers:\e[0m $inactive_containers                            \e[1;36m│\e[0m"
+  echo -e "\e[1;36m└──────────────────────────────────────────────────────┘\e[0m"
+
+  if [ -s "$FAILED_IMAGES_LOG" ]; then
+    echo -e "\n\e[1;33m┌──────────────────────────────────────────────────────┐\e[0m"
+    echo -e "\e[1;33m│\e[0m  \e[1;31m🚨 FAILED DEPLOYMENTS / IMAGES\e[0m                      \e[1;33m│\e[0m"
+    echo -e "\n\e[1;33m├──────────────────────────────────────────────────────┘\e[0m"
+    cat "$FAILED_IMAGES_LOG"
+    echo -e "\e[1;33m────────────────────────────────────────────────────────\e[0m"
+  fi
+
+  if [ -s "$INFO_LOG" ]; then
+    echo -e "\n\e[1;33m┌──────────────────────────────────────────────────────┐\e[0m"
+    echo -e "\e[1;33m│\e[0m  \e[1;31m🚨 DETAILED DIAGNOSTICS (Log Summary)\e[0m               \e[1;33m│\e[0m"
+    echo -e "\e[1;33m├──────────────────────────────────────────────────────┘\e[0m"
+    tail -n 30 "$INFO_LOG" | sed 's/^/   /'
+    echo -e "\e[1;33m────────────────────────────────────────────────────────\e[0m"
+  fi
+}
+
+self_heal_service() {
+  local stack=$1
+  local svc=$2
+  local file="$STACKS_DIR/$stack.yml"
+  
+  # YAML normalization before repair attempt
+  # (handled by deploy_stack normalizer)
+
+  CURRENT_SERVICE="[Repair] ${svc:0:30}"
+  update_ui "🔄 Nuking and re-pulling ${svc:0:35}..." "$CURRENT_PERCENT"
+  
+  # Auto-revert to golden state ONLY if force is used
+  if [ "$DO_FORCE" -eq 1 ]; then
+    restore_snapshot "$SNAPSHOT_DIR/golden_latest" >/dev/null 2>&1
+  fi
+  
+  # Run automated Network & Volume Guardian layer to prevent topology drifts
+  python3 /usr/local/lib/stacks_network_guardian.py 2>/dev/null || true
+  # ── CROSS-STACK DUPLICATE NAME KILLER ──────────────────────────────
+  # Check if another stack has a running container with same name
+  _dup_id=$(command docker ps -aq --filter "name=^/${svc}$" 2>/dev/null | head -1)
+  if [ -n "$_dup_id" ]; then
+    _dup_stack=$(command docker inspect "$_dup_id" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)
+    if [ "$_dup_stack" != "$stack" ]; then
+      update_ui "⚠️ Duplicate: $svc running in stack $_dup_stack — force removing..." "$CURRENT_PERCENT"
+      echo "[cross-stack conflict] $svc found in $_dup_stack, removing..." | log_output
+      command docker stop -t 1 "$_dup_id" >/dev/null 2>&1 || true
+      command docker rm -f "$_dup_id" >/dev/null 2>&1 || true
+      # PERSISTENCE LOOP: Wait until the name is actually released
+      for i in {1..10}; do
+        if ! command docker inspect "$_dup_id" >/dev/null 2>&1; then break; fi
+        sleep 0.5
+      done
+    fi
+  fi
+  # Also kill any stopped container with same name from any project
+  for _dead_id in $(command docker ps -aq --filter "name=^${svc}$" 2>/dev/null); do
+    command docker rm -f "$_dead_id" >/dev/null 2>&1 || true
+  done
+  # ─────────────────────────────────────────────────────────────────────
+
+  # Step 1: Deep nuke - find and kill by name AND by label
+  { docker compose -f "$file" stop -t 1 "$svc";     docker compose -f "$file" rm -f -s -v "$svc";     command docker rm -f "$svc"; } >/dev/null 2>&1 || true
+  # Kill any container with matching name regardless of project ownership
+  for cid in $(command docker ps -aq --filter "name=^${svc}$" 2>/dev/null); do
+    command docker stop -t 1 "$cid" >/dev/null 2>&1 || true
+    command docker rm -f "$cid" >/dev/null 2>&1 || true
+    # Brute force kill by ID if still alive
+    if command docker inspect "$cid" >/dev/null 2>&1; then
+      command docker kill -s SIGKILL "$cid" >/dev/null 2>&1 || true
+      sleep 1
+      command docker rm -f "$cid" >/dev/null 2>&1 || true
+    fi
+  done
+  # Also kill by compose service label in case name differs
+  for cid in $(command docker ps -aq --filter "label=com.docker.compose.service=$svc" 2>/dev/null); do
+    command docker stop -t 1 "$cid" >/dev/null 2>&1 || true
+    command docker rm -f "$cid" >/dev/null 2>&1 || true
+    # Brute force kill by ID if still alive
+    if command docker inspect "$cid" >/dev/null 2>&1; then
+      command docker kill -s SIGKILL "$cid" >/dev/null 2>&1 || true
+      sleep 1
+      command docker rm -f "$cid" >/dev/null 2>&1 || true
+    fi
+  done
+  # Final check - find ANY container with this name using ID-based removal
+  ZOMBIE_ID=$(command docker ps -aq --filter "name=$svc" 2>/dev/null | head -1)
+  if [ -n "$ZOMBIE_ID" ]; then
+    command docker kill -s SIGKILL "$ZOMBIE_ID" >/dev/null 2>&1 || true
+    sleep 1
+    command docker rm -f "$ZOMBIE_ID" >/dev/null 2>&1 || true
+  fi
+  
+  run_live_cmd "Repair Pulling $svc" "$CURRENT_PERCENT" docker compose -f "$file" pull --ignore-pull-failures "$svc"
+  
+  if run_live_cmd "Repair Deploying $svc" "$CURRENT_PERCENT" docker compose -f "$file" up -d $UP_BASE_ARGS --force-recreate "$svc"; then
+    update_ui "✔ Standard self-heal successful for $svc!" "$CURRENT_PERCENT"
+    sed -i "/$svc/d" "$FAILED_IMAGES_LOG" 2>/dev/null
+    sleep 2
+    return 0
+  fi
+
+  # Step 1 Failed: Analyze error
+  local error_output=$(tail -n 30 "$LOG_FILE" | sed -E 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] //')
+  local img=$(grep -A 10 "^[[:space:]]*$svc:" "$file" | grep "image:" | head -n 1 | awk '{print $2}')
+  
+  if ! echo "$error_output" | grep -q -iE "cannot assign requested address|address already in use|port is already allocated|invalid mac address|mac address"; then
+     # Not a collision or MAC issue, log error and exit
+     echo "[$stack -> $svc]" >> "$INFO_LOG"
+     echo "$error_output" | grep -iE "error|failed|not found|invalid|unauthorized|manifest|allocate" | tail -n 10 >> "$INFO_LOG"
+     echo "" >> "$INFO_LOG"
+     echo -e "  \e[1;31m✘\e[0m $stack \e[1;36m➜\e[0m \e[1;35m${img:-$svc}\e[0m" >> "$FAILED_IMAGES_LOG"
+     if [ "$DO_INFO" -eq 1 ]; then update_ui "❌ Failed Image: ${img:-$svc}" "$CURRENT_PERCENT"; sleep 2; fi
+     return 1
+  fi
+
+  update_ui "⚠️ Configuration collision/error detected for $svc!" "$CURRENT_PERCENT"
+  sleep 1.5
+
+  # Isolate YAML block
+  local in_block=0
+  local svc_start=""
+  local svc_end=""
+  local line_num=0
+  local base_indent=""
+
+  while IFS= read -r line; do
+    ((line_num++))
+    if [ $in_block -eq 0 ]; then
+      if [[ "$line" =~ ^([[:space:]]*)$svc:[[:space:]]*$ ]]; then
+        svc_start=$line_num
+        base_indent="${BASH_REMATCH[1]}"
+        in_block=1
+      fi
+    else
+      if [[ "$line" =~ ^${base_indent}[a-zA-Z0-9_-]+:[[:space:]]*$ ]]; then
+        svc_end=$((line_num - 1))
+        break
+      fi
+    fi
+  done < "$file"
+  
+  if [ -n "$svc_start" ] && [ -z "$svc_end" ]; then svc_end="$line_num"; fi
+
+  if [ -z "$svc_start" ]; then
+     update_ui "✘ Could not isolate YAML. Aborting auto-patch." "$CURRENT_PERCENT"
+     echo "[$stack -> $svc]" >> "$INFO_LOG"
+     echo "Failed: Could not isolate YAML block for patching." >> "$INFO_LOG"
+     echo "" >> "$INFO_LOG"
+     sleep 2
+     return 1
+  fi
+
+  update_ui "🎯 Locked onto $svc configuration block..." "$CURRENT_PERCENT"
+  sleep 1
+
+  # Safely extract existing settings
+  local old_ip=$(sed -n "${svc_start},${svc_end}p" "$file" | grep -oE "192\.168\.1\.[0-9]{1,3}" | head -n 1)
+  
+  local old_port=$(echo "$error_output" | grep -iE "port is already allocated|address already in use" | grep -oE ':[0-9]{2,5}' | grep -oE '[0-9]+' | head -n 1)
+  if [ -z "$old_port" ]; then
+      old_port=$(sed -n "${svc_start},${svc_end}p" "$file" | grep -oE ':[0-9]{2,5}:' | tr -d ':' | head -n 1)
+  fi
+
+  local old_mac=$(sed -n "${svc_start},${svc_end}p" "$file" | grep -iE '^[[:space:]]*mac_address:' | awk '{print $2}' | tr -d '"'\''')
+
+  local success=0
+
+  # =======================================
+  # MAC ADDRESS REPAIR ENGINE
+  # =======================================
+  if echo "$error_output" | grep -q -iE "invalid mac address|mac address"; then
+      if [ -n "$old_mac" ]; then
+          # Generate mathematically valid, locally administered Docker MAC Address
+          local new_mac=$(printf '02:42:ac:%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))
+          update_ui "🔍 Fixing MAC Address ($old_mac -> $new_mac)..." "$CURRENT_PERCENT"
+          
+          sed -i "${svc_start},${svc_end} s/$old_mac/$new_mac/g" "$file"
+          
+          docker compose -f "$file" rm -f -s -v "$svc" >/dev/null 2>&1
+          command docker rm -f "$svc" >/dev/null 2>&1 || true
+          
+          if run_live_cmd "Testing New MAC" "$CURRENT_PERCENT" docker compose -f "$file" up -d $UP_BASE_ARGS --force-recreate "$svc"; then
+              update_ui "✔ Success! Valid MAC bound." "$CURRENT_PERCENT"
+              success=1
+          else
+              # Refresh error output if it failed for a secondary IP/Port reason
+              error_output=$(tail -n 30 "$LOG_FILE" | sed -E 's/^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] //')
+          fi
+      fi
+  fi
+
+  # =======================================
+  # ADVANCED REPAIR: Scan 153-253 keeping Default Port
+  # =======================================
+  if [ $success -eq 0 ] && [ -n "$old_port" ] && echo "$error_output" | grep -q -iE "cannot assign requested address|address already in use|port is already allocated"; then
+      update_ui "🔍 Scanning Alias IPs for Port $old_port..." "$CURRENT_PERCENT"
+      
+      for i in {153..253}; do
+          local candidate_ip="192.168.1.$i"
+          
+          # Check if this specific IP:PORT is already written in ANY yaml to avoid obvious collisions
+          if grep -qR "$candidate_ip:$old_port" "$STACKS_DIR"/*.yml 2>/dev/null; then
+              continue
+          fi
+          
+          update_ui "🔍 Testing IP $candidate_ip:$old_port..." "$CURRENT_PERCENT"
+          
+          # Patch the YAML to bind to the candidate IP
+          if [ -n "$old_ip" ]; then
+              sed -i "${svc_start},${svc_end} s/$old_ip/$candidate_ip/g" "$file"
+          else
+              sed -i "${svc_start},${svc_end} s/\([\"' ]\)$old_port:/\1$candidate_ip:$old_port:/g" "$file"
+          fi
+          
+          docker compose -f "$file" rm -f -s -v "$svc" >/dev/null 2>&1
+          command docker rm -f "$svc" >/dev/null 2>&1 || true
+          
+          if run_live_cmd "Testing $candidate_ip" "$CURRENT_PERCENT" docker compose -f "$file" up -d $UP_BASE_ARGS --force-recreate "$svc"; then
+              update_ui "✔ Success! Bound to $candidate_ip:$old_port." "$CURRENT_PERCENT"
+              success=1
+              break
+          else
+              # Binding failed. Revert the patch back to original state for the next loop iteration
+              if [ -n "$old_ip" ]; then
+                  sed -i "${svc_start},${svc_end} s/$candidate_ip/$old_ip/g" "$file"
+              else
+                  sed -i "${svc_start},${svc_end} s/$candidate_ip:$old_port:/$old_port:/g" "$file"
+              fi
+          fi
+      done
+  fi
+
+  # =======================================
+  # NUCLEAR OPTION: Reset containerd socket
+  # Only runs if all other repairs failed AND container is still stuck
+  # =======================================
+  if [ $success -eq 0 ]; then
+    STUCK_ID=$(command docker ps -aq --filter "name=^${svc}$" 2>/dev/null | head -1)
+    if [ -n "$STUCK_ID" ]; then
+      update_ui "☢️ Nuclear reset: containerd socket clear for $svc..." "$CURRENT_PERCENT"
+      echo "[nuclear reset] $svc ($STUCK_ID) stuck - resetting containerd socket" | log_output
+      sudo systemctl stop docker.socket >/dev/null 2>&1 || true
+      sudo systemctl stop docker >/dev/null 2>&1 || true
+      sudo systemctl stop containerd >/dev/null 2>&1 || true
+      sleep 3
+      sudo rm -f /run/containerd/containerd.sock >/dev/null 2>&1 || true
+      sudo systemctl start containerd >/dev/null 2>&1 || true
+      sleep 3
+      sudo systemctl start docker >/dev/null 2>&1 || true
+      sleep 5
+      # Try one final deploy after nuclear reset
+      if run_live_cmd "Nuclear Deploy $svc" "$CURRENT_PERCENT" docker compose -f "$file" up -d $UP_BASE_ARGS --force-recreate "$svc"; then
+        update_ui "✔ Nuclear reset worked for $svc!" "$CURRENT_PERCENT"
+        sed -i "/$svc/d" "$FAILED_IMAGES_LOG" 2>/dev/null
+        sleep 2
+        return 0
+      fi
+    fi
+  fi
+
+  # =======================================
+  # FINAL OUTCOME & CLEANUP
+  # =======================================
+  if [ $success -eq 1 ]; then
+      sed -i "/$svc/d" "$FAILED_IMAGES_LOG" 2>/dev/null
+      sleep 2
+      return 0
+  else
+      update_ui "✘ All self-healing failed. Reverting YAML safely." "$CURRENT_PERCENT"
+      
+      echo "[$stack -> $svc]" >> "$INFO_LOG"
+      echo "Failed after exhausting repair options (IP/Port combos)." >> "$INFO_LOG"
+      echo "" >> "$INFO_LOG"
+      echo -e "  \e[1;31m✘\e[0m $stack \e[1;36m➜\e[0m \e[1;35m${img:-$svc}\e[0m" >> "$FAILED_IMAGES_LOG"
+      sleep 2
+      return 1
+  fi
+}
+
+# ==============================================================================
+# UP ENGINE MODULES
+# ==============================================================================
+deploy_stack() {
+  local stack=$1
+  local recreate=$2
+  local inc_amount=$3
+
+  # Auto-normalize YAML before every deploy
+  _yaml_result=$( REPAIR_FILE="$STACKS_DIR/$stack.yml" python3 - << 'PYEOF'
+import re, os
+filepath = os.environ.get("REPAIR_FILE")
+if not filepath or not os.path.exists(filepath):
+    import sys; sys.exit(0)
+content = open(filepath).read()
+original = content
+lines = content.split("\n")
+out = []
+for line in lines:
+    # ---- NEVER TOUCH THESE ----
+    if (re.match(r"^\s*image:", line) or
+        "image:" in line or
+        re.match(r"^\s*mac_address:", line) or
+        re.match(r"^\s*-\s*\d+\.\d+\.\d+\.\d+:", line) or
+        re.match(r"^\s*-\s*\"\d+:\d+", line) or
+        re.search(r"\d+\.\d+\.\d+\.\d+", line) or
+        re.search(r"http[s]?://", line) or
+        line.strip().startswith("#")):
+        out.append(line)
+        continue
+    # ---- REMOVE zero-width spaces and other invisible chars ----
+    line = line.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
+    # ---- FIX X-common-caps -> x-common-caps ----
+    if 'X-common-caps' in line:
+        line = line.replace('X-common-caps', 'x-common-caps')
+    # ---- FIX capitalized Name: -> name: at start of file ----
+    if re.match(r'^Name:\s*', line):
+        line = line.replace('Name:', 'name:', 1)
+    # ---- FIX broken env var quotes: "KEY="value" -> "KEY=value" ----
+    line = re.sub(r'"([A-Z][A-Z0-9_]*)="([^"]*)"', r'"\1=\2"', line)
+    # ---- FIX seccomp/apparmor: unconfined -> =unconfined ----
+    line = re.sub(r'"(seccomp|apparmor):\s+unconfined"', r'"\1=unconfined"', line)
+    # ---- FIX user: "0: 0" -> user: "0:0" ----
+    line = re.sub(r'(user:\s+["\']?)(\d+):\s+(\d+)(["\']?)', r'\1\2:\3\4', line)
+    # ---- FIX uncommented service list lines with arrow ----
+    if re.match(r'^\ *\d+\.\s+\S.*➔', line) and not line.strip().startswith('#'):
+        line = '# ' + line
+    # ---- FIX tmpfs /tmp: size= -> /tmp:size= ----
+    line = line.replace('"/tmp: size=', '"/tmp:size=')
+    # ---- FIX user: "0: 0" -> user: "0:0" ----
+    line = re.sub(r'(user:\s+["\']?)(\d+):\s+(\d+)(["\']?)', r'\1\2:\3\4', line)
+    # ---- FIX semicolon-separated keys ----
+    if ";" in line:
+        stripped = line.lstrip()
+        indent = line[:len(line)-len(stripped)]
+        parts = [p.strip() for p in stripped.split(";") if p.strip()]
+        if len(parts) > 1:
+            expanded = []
+            for part in parts:
+                m2 = re.match(r"^(\S.*?):\s*\{(.+)\}$", part)
+                if m2:
+                    expanded.append(f"{indent}{m2.group(1)}:")
+                    for kv in re.split(r",\s*", m2.group(2)):
+                        expanded.append(f"{indent}  {kv.strip()}")
+                else:
+                    expanded.append(f"{indent}{part}")
+            out.extend(expanded)
+            continue
+    # ---- FIX flow sequences: key: [a, b] -> block format ----
+    m = re.match(r"^(\s*)(\S.*?):\s*\[(.+)\]\s*$", line)
+    if m:
+        indent, key = m.group(1), m.group(2)
+        items = [i.strip() for i in re.split(r",(?![^{]*})", m.group(3))]
+        out.append(f"{indent}{key}:")
+        for item in items:
+            out.append(f"{indent}  - \"{item.strip().strip(chr(39)+chr(34))}\"")
+        continue
+    out.append(line)
+result = "\n".join(out)
+if result != original:
+    open(filepath, "w").write(result)
+    print("YAML_FIXED")
+PYEOF
+)
+  if echo "$_yaml_result" | grep -q "YAML_FIXED"; then
+    safe_echo "\e[1;33m🔧 YAML auto-normalized: $stack.yml\e[0m"
+    echo "[YAML normalized] $stack.yml" | log_output
+  fi
+
+  CURRENT_STACK="$stack"
+  if [ ${#CUSTOM_STACKS[@]} -gt 0 ]; then
+    CURRENT_STACK="$stack"
+  fi
+  CURRENT_SERVICE="All Services"
+
+  # Zombie killer disabled - run: stacks rm containers
+  
+  local p1=$(( CURRENT_PERCENT + (inc_amount * 1 / 5) ))
+  local p2=$(( CURRENT_PERCENT + (inc_amount * 2 / 5) ))
+  local p3=$(( CURRENT_PERCENT + (inc_amount * 4 / 5) ))
+  local p4=$(( CURRENT_PERCENT + inc_amount ))
+  
+  if [ "$DO_RESTART" -eq 1 ]; then
+    update_ui "Stopping Stack $stack..." "$p1"
+    docker compose -f "$STACKS_DIR/$stack.yml" stop 2>&1 | log_output
+  fi
+
+  local extra_args="$UP_BASE_ARGS"
+  if [ "$recreate" -eq 1 ]; then extra_args="$extra_args --force-recreate"; fi
+
+  if [ "$DO_INFO" -eq 1 ]; then
+       local imgs=$(grep "^[[:space:]]*image:" "$STACKS_DIR/$stack.yml" | awk '{print $2}' | paste -sd, - | cut -c 1-80)
+       if [ ${#imgs} -ge 80 ]; then imgs="${imgs}..."; fi
+       update_ui " Targeting: ${imgs:-Unknown}" "$p2"
+       sleep 1
+  fi
+
+  # Auto-fix missing cross-container networks before deploy
+  _netfix_result=$( STACK_FILE="$STACKS_DIR/$stack.yml" STACKS_DIR="$STACKS_DIR" python3 - << 'PYEOF'
+import os, re
+
+stack_file = os.environ.get("STACK_FILE")
+stacks_dir = os.environ.get("STACKS_DIR")
+fixed = []
+
+# Build global container->networks map
+container_nets = {}
+container_file = {}
+for f in sorted(os.listdir(stacks_dir)):
+    if not f.endswith(".yml"): continue
+    try:
+        c = open(os.path.join(stacks_dir, f)).read()
+        blocks = re.split(r"\n  (?=[a-zA-Z0-9][a-zA-Z0-9_-]+:\n)", c)
+        for block in blocks:
+            nm = re.search(r"container_name:\s*(\S+)", block)
+            if not nm: continue
+            cname = nm.group(1)
+            nets = set(re.findall(r"      ([a-zA-Z0-9_-]+_net):", block))
+            container_nets[cname] = nets
+            container_file[cname] = f
+    except: pass
+
+# Check this stack file for missing connections
+try:
+    content = open(stack_file).read()
+    original = content
+    blocks = re.split(r"\n  (?=[a-zA-Z0-9][a-zA-Z0-9_-]+:\n)", content)
+    for block in blocks:
+        nm = re.search(r"container_name:\s*(\S+)", block)
+        if not nm: continue
+        cname = nm.group(1)
+        my_nets = container_nets.get(cname, set())
+        env_vals = re.findall(r"=([a-zA-Z0-9][a-zA-Z0-9_-]+)(?::[0-9]+)?", block)
+        for val in env_vals:
+            if val not in container_nets or val == cname: continue
+            their_nets = container_nets[val]
+            shared = my_nets & their_nets
+            if shared: continue
+            # Need a shared network - use base name of referenced container
+            base = val
+            for s in ["-db","-redis","-cache","-worker","-postgres","-mysql","-mongo","_db","_redis"]:
+                if val.endswith(s):
+                    base = val[:-len(s)]
+                    break
+            net_name = f"{base}_net"
+            # Add to this container in this file
+            def add_net(m, net_name=net_name, cname=cname):
+                blk = m.group(0)
+                if net_name in blk: return blk
+                blk = re.sub(
+                    r"(    networks:\n(?:      [^\n]+\n)*)",
+                    lambda nm2: nm2.group(0) + f"      {net_name}:\n        priority: 500\n" if net_name not in nm2.group(0) else nm2.group(0),
+                    blk
+                )
+                return blk
+            content = re.sub(
+                rf"(    container_name: {re.escape(cname)}\n(?:    [^\n]*\n)*)",
+                add_net, content
+            )
+            # Add to top-level networks
+            if net_name not in content:
+                content = re.sub(
+                    r"(networks:\n)",
+                    rf"\1  {net_name}: {{name: {net_name}, external: true}}\n",
+                    content, count=1
+                )
+            fixed.append(f"{cname}->{val} via {net_name}")
+    if content != original:
+        open(stack_file, "w").write(content)
+        for f in fixed:
+            print(f"NET_FIXED:{f}")
+except Exception as e:
+    print(f"NET_ERR:{e}")
+PYEOF
+)
+  if echo "$_netfix_result" | grep -q "NET_FIXED:"; then
+    echo "$_netfix_result" | grep "NET_FIXED:" | while read line; do
+      msg="${line#NET_FIXED:}"
+      update_ui "🔗 Auto-linked: $msg" "$p2"
+      echo "[net-autofix] $msg" | log_output
+      sleep 0.5
+    done
+  fi
+  if echo "$_netfix_result" | grep -q "NET_ERR:"; then
+    echo "$_netfix_result" | grep "NET_ERR:" | log_output
+  fi
+
+  update_ui "Pulling images for Stack $stack..." "$p2"
+  run_live_cmd "Pulling $stack" "$p2" docker compose -f "$STACKS_DIR/$stack.yml" pull --ignore-pull-failures
+
+  update_ui "Deploying Stack $stack..." "$p3"
+  if ! run_live_cmd "Deploying $stack" "$p3" docker compose -f "$STACKS_DIR/$stack.yml" up -d $extra_args; then
+    echo "[$stack -> $stack]" >> "$INFO_LOG"
+    tail -n 2000 "$LOG_FILE" | grep -iE "error|failed|not found|invalid|unauthorized|manifest|allocate" | tail -n 10 >> "$INFO_LOG" || echo "Check full log for details." >> "$INFO_LOG"
+    echo "---" >> "$INFO_LOG"
+
+    if [ "$DO_INFO" -eq 1 ]; then
+         update_ui "❌ STACK DEPLOY FAILED: $stack" "$CURRENT_PERCENT"
+         sleep 2
+    fi
+    if [ "$DO_REPAIR" -eq 1 ]; then
+      update_ui "⚠️ Error detected in $stack. Repair Mode ACTIVE..." "$CURRENT_PERCENT"
+      sleep 1.5
+      # ── STUCK CONTAINER CLEANUP ─────────────────────────────────────────
+      update_ui "🧹 Cleaning stuck containers..." "$CURRENT_PERCENT"
+      # Only clean stuck containers belonging to THIS stack
+      _stack_svcs=$(grep -E '^[[:space:]]{2}[a-zA-Z0-9_-]+:' "$STACKS_DIR/$stack.yml" | grep -v 'profiles:' | awk -F: '{print $1}' | tr -d ' ' 2>/dev/null)
+      _stuck=""
+      for _ss in $_stack_svcs; do
+        _sc=$(docker ps -a --filter "name=^${_ss}$" --filter "status=created" --format "{{.Names}}" 2>/dev/null)
+        _sc+=$(docker ps -a --filter "name=^${_ss}$" --filter "status=dead" --format "{{.Names}}" 2>/dev/null)
+        _sc+=$(docker ps -a --filter "name=^${_ss}$" --filter "status=removing" --format "{{.Names}}" 2>/dev/null)
+        [ -n "$_sc" ] && _stuck="$_stuck $_sc"
+      done
+      _stuck=$(echo $_stuck | tr ' ' '
+' | sort -u | tr '
+' ' ')
+      if [ -n "$_stuck" ]; then
+        for _sc in $_stuck; do
+          update_ui "🗑️ Removing stuck: $_sc" "$CURRENT_PERCENT"
+          docker rm -f "$_sc" >/dev/null 2>&1 || true
+        done
+        echo "Stuck containers removed: $_stuck" >> "$INFO_LOG"
+      fi
+      # Kill any runc processes stuck more than 5 minutes
+      _stuck_runc=$(ps -eo pid,etimes,comm | awk '$2 > 300 && $3 ~ /runc/ {print $1}' 2>/dev/null)
+      if [ -n "$_stuck_runc" ]; then
+        for _rp in $_stuck_runc; do
+          kill -9 "$_rp" 2>/dev/null || true
+        done
+        echo "Killed stuck runc PIDs: $_stuck_runc" >> "$INFO_LOG"
+      fi
+      # Drop caches to free RAM before repair
+      sudo sh -c "echo 3 > /proc/sys/vm/drop_caches" 2>/dev/null || true
+      # ─────────────────────────────────────────────────────────────────────
+      local all_repaired=1
+      
+      # If only one service was requested, only repair that one
+      local file_svcs
+      if [ "$ONLY_THIS_STACK" -eq 1 ] && [ -n "$start_svc" ]; then
+        file_svcs="$start_svc"
+      else
+        file_svcs=$(grep -E '^[[:space:]]{2}[a-zA-Z0-9_-]+:' "$STACKS_DIR/$stack.yml" | grep -v 'profiles:' | awk -F: '{print $1}' | tr -d ' ' 2>/dev/null)
+        if [ -z "$file_svcs" ]; then
+          file_svcs=$(docker compose -f "$STACKS_DIR/$stack.yml" config --services 2>/dev/null)
+        fi
+      fi
+      
+      for svc in $file_svcs; do
+        # Surgically isolate ONLY the explicit services requested in your mega-string
+        if [ ${#TARGET_ARGS[@]} -gt 0 ]; then
+          local match_found=0
+          for target in "${TARGET_ARGS[@]}"; do
+            # If the argument matches the service name exactly, let it through
+            if [ "$target" == "$svc" ]; then
+              match_found=1
+              break
+            fi
+          done
+          if [ $match_found -eq 0 ]; then
+            continue
+          fi
+        fi
+
+        # Catch stopped containers OR running containers trapped in an unhealthy deadlock state
+        svc_running=$(command docker ps -q --filter "name=^${svc}$" --filter "status=running" 2>/dev/null | head -1)
+        svc_unhealthy=$(command docker ps -q --filter "name=^${svc}$" --filter "health=unhealthy" 2>/dev/null | head -1)
+        
+        if [ -n "$svc_running" ] && [ -z "$svc_unhealthy" ]; then
+          # Service is running normally and healthy — skip safely
+          continue
+        elif [ -n "$svc_unhealthy" ]; then
+          update_ui "🚨 Deadlock Detected: $svc is reporting UNHEALTHY state!" "$CURRENT_PERCENT"
+          sleep 1.5
+        fi
+        CURRENT_SERVICE="[Repair] ${svc:0:30}"
+        update_ui "🔍 Checking ${svc:0:35}..." "$CURRENT_PERCENT"
+        if ! run_live_cmd "Testing $svc" "$CURRENT_PERCENT" docker compose -f "$STACKS_DIR/$stack.yml" up -d $UP_BASE_ARGS "$svc"; then
+          if ! self_heal_service "$stack" "$svc"; then
+             all_repaired=0
+          fi
+        fi
+      done
+      
+      CURRENT_SERVICE="All Services"
+      
+      if [ $all_repaired -eq 1 ]; then
+         sed -i "/\[$stack -> $stack\]/,/---/d" "$INFO_LOG"
+         echo -e "  \e[1;32m✔\e[0m $stack \e[1;32m➜\e[0m Fully Repaired!" >> "$INFO_LOG"
+      else
+         sed -i "/---/d" "$INFO_LOG"
+      fi
+      
+      run_live_cmd "Finalizing $stack" "$CURRENT_PERCENT" docker compose -f "$STACKS_DIR/$stack.yml" up -d $extra_args || true
+    else
+      sed -i "/---/d" "$INFO_LOG"
+    fi
+  fi
+  
+  update_ui "Restarting Sablier..." "$p4"
+  command docker restart sablier 2>&1 | log_output || true
+  CURRENT_PERCENT=$p4
+
+}
+
+deploy_partial_stack() {
+  local stack=$1
+  local start_svc=$2
+  local recreate=$3
+  local end_arg="${4:-}"
+  CURRENT_STACK="$stack"
+
+  local all_svcs=($(awk '/^services:/{flag=1; next} /^[a-z]/{flag=0} flag && /^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/, ""); print}' "$STACKS_DIR/$stack.yml"))
+  local start_idx=-1
+  
+  for i in "${!all_svcs[@]}"; do
+    if [ "${all_svcs[$i]}" == "$start_svc" ]; then start_idx=$i; break; fi
+  done
+
+  if [ $start_idx -eq -1 ]; then
+    printf "\e[?25h"
+    clear_ui
+    echo -e "\e[1;31m✘ Error: Service '$start_svc' not found in stack $stack\e[0m"
+    exit 1
+  fi
+  if [ "$ONLY_THIS_STACK" -eq 1 ]; then
+    # solo/just/only — deploy ONLY this one service, nothing else
+    all_svcs=("${all_svcs[$start_idx]}")
+    start_idx=0
+  elif [[ "$end_arg" =~ ^[0-9]+$ ]]; then
+    all_svcs=("${all_svcs[@]:0:$(( start_idx + 1 + end_arg ))}")
+  elif [ -n "$end_arg" ]; then
+    _end_idx=-1
+    for _ei in "${!all_svcs[@]}"; do
+      if [ "${all_svcs[$_ei]}" == "$end_arg" ]; then _end_idx=$_ei; break; fi
+    done
+    if [ $_end_idx -ge 0 ]; then all_svcs=("${all_svcs[@]:0:$(( _end_idx + 1 ))}"); fi
+  fi
+  
+  if [ "$DO_RESTART" -eq 1 ]; then
+     CURRENT_SERVICE="All Remaining"
+     update_ui "Stopping sequence in Stack $stack..." 25
+     for svc in "${all_svcs[@]:$start_idx}"; do
+       docker compose -f "$STACKS_DIR/$stack.yml" stop "$svc" 2>&1 | log_output
+     done
+  fi
+
+  local extra_args="$UP_BASE_ARGS"
+  if [ "$recreate" -eq 1 ]; then extra_args="$extra_args --force-recreate"; fi
+
+  for svc in "${all_svcs[@]:$start_idx}"; do
+    CURRENT_SERVICE="$svc"
+    local img=$(grep -A 10 "^[[:space:]]*$svc:" "$STACKS_DIR/$stack.yml" | grep "image:" | head -n 1 | awk '{print $2}')
+    if [ "$DO_INFO" -eq 1 ]; then
+       update_ui " Pulling Image: ${img:-Unknown}" 65
+       sleep 1
+    fi
+    run_live_cmd "Pulling $svc" 65 docker compose -f "$STACKS_DIR/$stack.yml" pull --ignore-pull-failures "$svc"
+    if ! run_live_cmd "Deploying $svc" 75 docker compose -f "$STACKS_DIR/$stack.yml" up -d $extra_args "$svc"; then
+       echo "[$stack -> $svc]" >> "$INFO_LOG"
+       tail -n 2000 "$LOG_FILE" | grep -iE "error|failed|not found|invalid|unauthorized|manifest|allocate" | tail -n 10 >> "$INFO_LOG" || echo "Check full log for details." >> "$INFO_LOG"
+       echo "" >> "$INFO_LOG"
+       echo -e "  \e[1;31m✘\e[0m $stack \e[1;36m➜\e[0m \e[1;35m${img:-$svc}\e[0m" >> "$FAILED_IMAGES_LOG"
+
+       if [ "$DO_REPAIR" -eq 1 ]; then
+         self_heal_service "$stack" "$svc"
+       else
+         if [ "$DO_INFO" -eq 1 ]; then
+           update_ui "❌ Failed: ${img:-$svc}" "$CURRENT_PERCENT"
+           sleep 2
+         fi
+       fi
+    fi
+  done
+  
+  CURRENT_SERVICE="Sablier"
+  update_ui "Restarting Sablier..." 100
+  command docker restart sablier 2>&1 | log_output || true
+}
+
+post_deploy_checks() {
+  clear_ui
+  echo -e "\n\e[1;36m🔍 Verifying Network Health...\e[0m"
+  for domain in "${DOMAINS[@]}"; do
+      if ping -c 1 -W 2 "$domain" > /dev/null 2>&1; then
+          echo -e "\e[1;32m  ✔ $domain is Healthy\e[0m"
+      else
+          echo -e "\e[1;31m  ✘ $domain is Offline\e[0m"
+      fi
+  done
+  if [ -f /usr/local/bin/stacks ] && [[ "$COMMAND" =~ ^(up|continue)$ ]]; then echo -e "stacks up core_2 recreate"; echo -e "done — replaced lines 251 to 281\n"; echo -e "i want art to be right here the stacks art\n"; fi; show_final_summary
+  echo -e "\e[1;34m🛡️  Activating Watchdog Monitor...\e[0m"
+  rm -f /var/run/docker-manual-stop 2>/dev/null || true
+  sudo systemctl start docker-watchdog.service 2>/dev/null || true
+  echo -e "\n\e[1;32m✨ DEPLOYMENT SEQUENCE COMPLETE & WATCHDOG LIVE ✨\e[0m"
+  echo -e "\n\e[1;36m[ Press 'L' for full log, Enter or any key to exit ]\e[0m"
+  printf "\e[?25l"
+  stty echo 2>/dev/null
+  read -r -n 1 -s key
+  printf "\e[?25h"
+  if [[ "${key,,}" == "l" ]]; then less -R "$LOG_FILE"; fi
+  exit 0
+}
+
+finish_action_sequence() {
+  local display_mode=$1
+  # Remove manual stop flag so watchdog can resume monitoring
+  rm -f /var/run/docker-manual-stop 2>/dev/null || true
+  clear_ui
+  if [[ "$display_mode" =~ ^(up|continue)$ ]]; then
+    show_final_summary
+  fi
+  echo -e "\n\n\e[1;32m✨ SEQUENCE COMPLETE ✨\e[0m"
+  printf "\e[?25h"
+  if [[ "$DO_INFO" -eq 1 ]]; then
+    if [ -s "$INFO_LOG" ]; then
+      echo -e "\n\e[1;33m── Diagnostics ─────────────────────────────────────────\e[0m"
+      tail -n 20 "$INFO_LOG" | sed 's/^/   /'
+      echo -e "\e[1;33m────────────────────────────────────────────────────────\e[0m"
+    fi
+    if [ -s "$LOG_FILE" ]; then
+      echo -e "\n\e[1;36m── Last 20 log lines ───────────────────────────────────\e[0m"
+      tail -n 20 "$LOG_FILE" | sed 's/^/   /'
+      echo -e "\e[1;36m────────────────────────────────────────────────────────\e[0m"
+    fi
+    echo -e "\n\e[1;36m[ Press 'L' for full log, Enter or any key to exit ]\e[0m"
+    printf "\e[?25l"
+    stty echo 2>/dev/null
+    read -r -n 1 -s key
+    printf "\e[?25h"
+    if [[ "${key,,}" == "l" ]]; then less -R "$LOG_FILE"; fi
+  fi
+  exit 0
+}
+
+# ==============================================================================
+# DOWN & ACTION ENGINE MODULES
+# ==============================================================================
+take_down_stack() {
+  local stack=$1
+  local inc_amount=$2
+  local YAML="$STACKS_DIR/$stack.yml"
+  CURRENT_STACK="$stack"
+  CURRENT_SERVICE="All Services"
+  
+  local p1=$(( CURRENT_PERCENT + (inc_amount / 2) ))
+  local p2=$(( CURRENT_PERCENT + inc_amount ))
+
+  update_ui "Checking status..." "$CURRENT_PERCENT"
+
+  if [ -n "$(docker compose -f "$YAML" ps -a -q 2>/dev/null)" ]; then
+    down_args=""
+    if [ "$DO_CLEAN" -eq 1 ]; then down_args="--remove-orphans -v"; fi
+    if [ "$DO_FORCE" -eq 1 ]; then down_args="$down_args --timeout 1"; fi
+    
+    update_ui "Stopping and Removing..." "$p1"
+    docker compose -f "$YAML" down $down_args 2>&1 | log_output
+    update_ui "Safely stopped." "$p2"
+  else
+    update_ui "Already down. Skipping..." "$p2"
+  fi
+  CURRENT_PERCENT=$p2
+}
+
+deep_clean_networks() {
+  update_ui "Deep Cleaning Stubborn Networks..." "$CURRENT_PERCENT"
+  echo -e "\n=== Deep Cleaning Networks ===" | log_output
+  for net in $(docker network ls --format '{{.Name}}' | grep -vE '^(bridge|host|none|ingress|docker_gwbridge)$'); do
+      containers=$(docker network inspect "$net" -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)
+      if [ ! -z "$containers" ]; then
+          for container in $containers; do
+              docker network disconnect -f "$net" "$container" 2>&1 | log_output
+          done
+      fi
+      docker network rm "$net" 2>&1 | log_output
+  done
+  docker network prune -f 2>&1 | log_output
+}
+
+manage_stack() {
+  local action=$1
+  local stack=$2
+  local inc_amount=$3
+  local YAML="$STACKS_DIR/$stack.yml"
+  
+  CURRENT_STACK="$stack"
+  CURRENT_SERVICE="All Services"
+  local p2=$(( CURRENT_PERCENT + inc_amount ))
+
+  update_ui "${action^}ing Stack..." "$CURRENT_PERCENT"
+  action_args=""
+  if [ "$DO_FORCE" -eq 1 ] && [[ "$action" =~ ^(stop|restart)$ ]]; then 
+      action_args="--timeout 1"
+  fi
+
+  docker compose -f "$YAML" "$action" $action_args 2>&1 | log_output
+  update_ui "Stack ${action}ed." "$p2"
+  CURRENT_PERCENT=$p2
+}
+
+
+# ==============================================================================
+# ── RESTORE HANDLER ─────────────────────────────────────────────────────────
+if [ "$DO_RESTORE" -eq 1 ] && [ "$COMMAND" != "up" ] && [ "$COMMAND" != "down" ]; then
+  printf "\e[?25h"
+  echo -e "\n\e[1;35m📸 Restoring from golden snapshot...\e[0m"
+  if [ -n "$TARGET_STACK" ]; then
+    _snap="$SNAPSHOT_DIR/golden_latest/stacks/$TARGET_STACK.yml"
+    if [ -f "$_snap" ]; then
+      cp "$_snap" "$STACKS_DIR/$TARGET_STACK.yml"
+      echo -e "\e[1;32m✔ Restored: $TARGET_STACK\e[0m"
+    else
+      echo -e "\e[1;31m✘ No snapshot found for $TARGET_STACK\e[0m"
+    fi
+  else
+    restore_snapshot "$SNAPSHOT_DIR/golden_latest"
+    echo -e "\e[1;32m✔ Full restore complete\e[0m"
+  fi
+  exit 0
+fi
+
+if [ "$DO_RESTORE" -eq 1 ] && [ "$COMMAND" == "up" ]; then
+  echo -e "\n\e[1;35m📸 Restoring from snapshot before deploy...\e[0m"
+  if [ ${#PARSED_STACKS[@]} -gt 0 ]; then
+    for _rs in "${PARSED_STACKS[@]}"; do
+      _snap="$SNAPSHOT_DIR/golden_latest/stacks/$_rs.yml"
+      [ -f "$_snap" ] && cp "$_snap" "$STACKS_DIR/$_rs.yml" && echo -e "\e[1;32m✔ Restored: $_rs\e[0m"
+    done
+  elif [ -n "$TARGET_STACK" ]; then
+    _snap="$SNAPSHOT_DIR/golden_latest/stacks/$TARGET_STACK.yml"
+    [ -f "$_snap" ] && cp "$_snap" "$STACKS_DIR/$TARGET_STACK.yml" && echo -e "\e[1;32m✔ Restored: $TARGET_STACK\e[0m"
+  else
+    restore_snapshot "$SNAPSHOT_DIR/golden_latest"
+  fi
+fi
+
+# SNAPSHOT ENGINE
+# ==============================================================================
+SNAPSHOT_DIR="/srv/stacks/Snapshots"
+
+take_snapshot() {
+  local label="${1:-golden}"
+  local ts=$(date +%Y%m%d_%H%M%S)
+  local snap="$SNAPSHOT_DIR/${label}_${ts}"
+  mkdir -p "$snap/stacks" "$snap/dynamics" "$snap/traefik"
+  
+  echo "📸 Taking snapshot: $snap"
+  
+  # Snapshot all stack files
+  cp "$STACKS_DIR"/*.yml "$snap/stacks/" 2>/dev/null
+  
+  # Snapshot all dynamics
+  cp /srv/stacks/Configs/Dynamics/*.yml "$snap/dynamics/" 2>/dev/null
+  
+  # Snapshot Traefik static config flags
+  command docker inspect traefik 2>/dev/null |     python3 -c "import sys,json; d=json.load(sys.stdin)[0]; print(chr(10).join(d.get('Args',[])))"     > "$snap/traefik/static_flags.txt" 2>/dev/null
+  
+  # Snapshot Sablier config
+  command docker inspect sablier 2>/dev/null > "$snap/traefik/sablier_inspect.json" 2>/dev/null
+  
+  # Snapshot Authentik env
+  command docker inspect authentik-server 2>/dev/null |     python3 -c "import sys,json; d=json.load(sys.stdin)[0]; [print(e) for e in d['Config']['Env']]"     > "$snap/traefik/authentik_env.txt" 2>/dev/null
+
+  # Save a symlink to latest golden
+  if [ "$label" == "golden" ]; then
+    ln -sfn "$snap" "$SNAPSHOT_DIR/golden_latest"
+  fi
+  
+  echo "✔ Snapshot saved: $snap"
+  echo "$snap"
+}
+
+restore_snapshot() {
+  local snap="${1:-$SNAPSHOT_DIR/golden_latest}"
+  
+  if [ ! -d "$snap" ]; then
+    echo "✘ Snapshot not found: $snap"
+    return 1
+  fi
+  
+  echo "🔄 Restoring from: $snap"
+  
+  # Restore stack files
+  if [ -d "$snap/stacks" ]; then
+    cp "$snap/stacks"/*.yml "$STACKS_DIR/" 2>/dev/null
+    echo "  ✔ Stack files restored"
+  fi
+  
+  # Restore dynamics
+  if [ -d "$snap/dynamics" ]; then
+    cp "$snap/dynamics"/*.yml /srv/stacks/Configs/Dynamics/ 2>/dev/null
+    echo "  ✔ Dynamics restored"
+    command docker restart traefik 2>/dev/null && echo "  ✔ Traefik reloaded"
+  fi
+  
+  echo "✔ Restore complete from: $snap"
+}
+
+list_snapshots() {
+  echo "📋 Available snapshots:"
+  ls -lt "$SNAPSHOT_DIR" 2>/dev/null | grep -v "^total" | grep -v "golden_latest" | head -20
+  echo ""
+  if [ -L "$SNAPSHOT_DIR/golden_latest" ]; then
+    echo "🌟 Golden latest → $(readlink $SNAPSHOT_DIR/golden_latest)"
+  fi
+}
+
+# ==============================================================================
+# MAIN EXECUTION DISPATCHER
+# ==============================================================================
+if [ "$COMMAND" != "build" ]; then show_header; fi
+if [ "$DO_REPAIR" -eq 1 ] && [ "$COMMAND" == "up" ]; then
+  echo -e "\e[1;33m🛠️  REPAIR MODE ENABLED: Self-healing active.\e[0m"
+fi
+
+if [[ "$COMMAND" =~ ^(down|stop)$ ]]; then
+  echo "Stopping Watchdog Services..." | log_output
+  sudo systemctl stop docker-watchdog.service 2>/dev/null || true
+  touch /var/run/docker-manual-stop 2>/dev/null || true
+  touch /srv/stacks/.stacks-disabled
+elif [[ "$COMMAND" =~ ^(up|start)$ ]]; then
+  rm -f /srv/stacks/.stacks-disabled
+  # Only pause watchdog during deployment
+  touch /var/run/docker-manual-stop 2>/dev/null || true
+fi
+
+init_ui
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: UP
+# ---------------------------------------------------------
+if [ "$COMMAND" == "up" ]; then
+  if [ -z "$TARGET_STACK" ] && [ ${#CUSTOM_STACKS[@]} -eq 0 ]; then
+    total_stacks=${#STACKS[@]}
+    pct_per_stack=0
+    if [ "$total_stacks" -gt 0 ]; then pct_per_stack=$(( 100 / total_stacks )); fi
+    
+    for stack in "${STACKS[@]}"; do
+      deploy_stack "$stack" "$DO_RECREATE" "$pct_per_stack"
+      # Keep critical services alive after every stack
+      if [ "$DO_REPAIR" -eq 1 ]; then
+        for crit in traefik sablier cloudflared_tunnel_core authentik-server; do
+          STATUS=$(command docker inspect --format='{{.State.Status}}' "$crit" 2>/dev/null)
+          if [ "$STATUS" != "running" ]; then
+            echo "  -> Restarting critical: $crit" | log_output
+            command docker restart "$crit" >/dev/null 2>&1 || true
+          fi
+        done
+        # Restart Sablier so it registers new containers and puts them to sleep
+        echo "  -> Restarting sablier to register and sleep new containers..." | log_output
+        command docker restart sablier >/dev/null 2>&1 || true
+        sleep 5
+      fi
+      smart_wait $DELAY
+    done
+    CURRENT_STACK="System"
+    CURRENT_SERVICE="Engine"
+    update_ui "Restarting Docker..." 100
+    post_deploy_checks
+
+  elif [ -n "$TARGET_STACK" ] && [ -z "$TARGET_SERVICE" ] && [ ${#CUSTOM_STACKS[@]} -eq 0 ]; then
+    if [ "$DO_CONTINUE" -eq 1 ]; then
+      START_INDEX=-1
+      for i in "${!STACKS[@]}"; do
+        if [[ "${STACKS[$i]}" == "${TARGET_STACK}" ]]; then START_INDEX=$i; break; fi
+      done
+      if [ $START_INDEX -eq -1 ]; then 
+        printf "\e[?25h"; clear_ui; echo -e "\e[1;31m✘ Error: Stack $TARGET_STACK not found\e[0m"; exit 1
+      fi
+      
+      remaining=$(( ${#STACKS[@]} - START_INDEX ))
+      pct_per_stack=0
+      if [ "$remaining" -gt 0 ]; then pct_per_stack=$(( 100 / remaining )); fi
+      
+      _stack_slice=("${STACKS[@]:$START_INDEX}")
+      if [[ "$CONTINUE_COUNT" -ge 0 ]] 2>/dev/null; then
+        _stack_slice=("${STACKS[@]:$START_INDEX:$(( CONTINUE_COUNT + 1 ))}")
+      fi
+      for stack in "${_stack_slice[@]}"; do
+        deploy_stack "$stack" "$DO_RECREATE" "$pct_per_stack"
+        if [ "$ONLY_THIS_STACK" -eq 1 ]; then finish_action_sequence "continue"; fi
+        smart_wait $DELAY
+      done
+      post_deploy_checks
+    else
+      deploy_stack "$TARGET_STACK" "$DO_RECREATE" 100
+      finish_action_sequence "up"
+    fi
+
+  elif [ -n "$TARGET_STACK" ] && [ -n "$TARGET_SERVICE" ]; then
+    if [ "$DO_CONTINUE" -eq 1 ] || [ "$ONLY_THIS_STACK" -eq 1 ]; then
+      START_INDEX=-1
+      for i in "${!STACKS[@]}"; do
+        if [[ "${STACKS[$i]}" == "${TARGET_STACK}" ]]; then START_INDEX=$i; break; fi
+      done
+      if [ $START_INDEX -eq -1 ]; then 
+        printf "\e[?25h"; clear_ui; echo -e "\e[1;31m✘ Error: Stack $TARGET_STACK not found\e[0m"; exit 1
+      fi
+      
+      _ea="${TARGET_END_SERVICE}"
+      [[ "$CONTINUE_COUNT" -ge 0 ]] 2>/dev/null && _ea="$CONTINUE_COUNT"
+      deploy_partial_stack "$TARGET_STACK" "$TARGET_SERVICE" "$DO_RECREATE" "$_ea"
+      if [ "$ONLY_THIS_STACK" -eq 1 ]; then finish_action_sequence "continue"; fi
+      
+      NEXT_INDEX=$((START_INDEX + 1))
+      if [ $NEXT_INDEX -lt ${#STACKS[@]} ]; then
+        smart_wait $DELAY
+        remaining=$(( ${#STACKS[@]} - NEXT_INDEX ))
+        pct_per_stack=0
+        if [ "$remaining" -gt 0 ]; then pct_per_stack=$(( (100 - CURRENT_PERCENT) / remaining )); fi
+        for stack in "${STACKS[@]:$NEXT_INDEX}"; do
+          deploy_stack "$stack" "$DO_RECREATE" "$pct_per_stack"
+          smart_wait $DELAY
+        done
+      fi
+      post_deploy_checks
+    else
+      CURRENT_STACK="$TARGET_STACK"
+      CURRENT_SERVICE="$TARGET_SERVICE"
+      
+      if [ "$DO_RESTART" -eq 1 ]; then
+         update_ui "Stopping service $TARGET_SERVICE..." 25
+         docker compose -f "$STACKS_DIR/$TARGET_STACK.yml" stop "$TARGET_SERVICE" 2>&1 | log_output
+      fi
+
+      extra_args="$UP_BASE_ARGS"
+      if [ "$DO_RECREATE" -eq 1 ]; then extra_args="--force-recreate"; fi
+      
+      run_live_cmd "Pulling $TARGET_SERVICE" 50 docker compose -f "$STACKS_DIR/$TARGET_STACK.yml" pull --ignore-pull-failures "$TARGET_SERVICE"
+      if ! run_live_cmd "Deploying $TARGET_SERVICE" 75 docker compose -f "$STACKS_DIR/$TARGET_STACK.yml" up -d $extra_args "$TARGET_SERVICE"; then
+         if [ "$DO_REPAIR" -eq 1 ]; then self_heal_service "$TARGET_STACK" "$TARGET_SERVICE"; fi
+      fi
+      command docker restart sablier >/dev/null 2>&1 || true
+      finish_action_sequence "up"
+    fi
+
+  elif [ ${#CUSTOM_STACKS[@]} -gt 0 ]; then
+    # Pipeline execution loop processing chained stack + service configurations
+    total_stacks=${#CUSTOM_STACKS[@]}
+    pct_per_stack=0
+    if [ "$total_stacks" -gt 0 ]; then pct_per_stack=$(( 100 / total_stacks )); fi
+    
+    for idx in "${!CUSTOM_STACKS[@]}"; do
+      stack="${CUSTOM_STACKS[$idx]}"
+      service="${CUSTOM_SERVICES[$idx]}"
+      if [ ! -f "$STACKS_DIR/$stack.yml" ]; then
+        update_ui "✘ Warning: Stack $stack.yml not found, skipping..." "$CURRENT_PERCENT"
+        sleep 1.5
+        continue
+      fi
+      
+      if [ -n "$service" ]; then
+        _ea="${TARGET_END_SERVICE}"
+        [[ "$CONTINUE_COUNT" -ge 0 ]] 2>/dev/null && _ea="$CONTINUE_COUNT"
+        deploy_partial_stack "$stack" "$service" "$DO_RECREATE" "$_ea"
+        CURRENT_PERCENT=$(( CURRENT_PERCENT + pct_per_stack ))
+      else
+        deploy_stack "$stack" "$DO_RECREATE" "$pct_per_stack"
+      fi
+      
+      # Pipeline persistence override
+      if [ "$ONLY_THIS_STACK" -eq 1 ]; then continue; fi
+      if [ $idx -lt $((total_stacks - 1)) ]; then
+        smart_wait $DELAY
+      fi
+    done
+    finish_action_sequence "up"
+  fi
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: DOWN
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "down" ]; then
+  if [ -z "$TARGET_STACK" ] && [ ${#CUSTOM_STACKS[@]} -eq 0 ]; then
+    total_stacks=${#REVERSED_STACKS[@]}
+    pct_per_stack=0
+    if [ "$total_stacks" -gt 0 ]; then pct_per_stack=$(( 90 / total_stacks )); fi
+    for stack in "${REVERSED_STACKS[@]}"; do
+      take_down_stack "$stack" "$pct_per_stack"
+      if [ -n "$(docker compose -f "$STACKS_DIR/$stack.yml" ps -a -q 2>/dev/null)" ]; then
+          smart_wait $DELAY
+      else
+          smart_wait 2
+      fi
+    done
+    deep_clean_networks
+    update_ui "All Stacks & Networks Purged." 100
+    finish_action_sequence "down"
+
+  elif [ -n "$TARGET_STACK" ] && [ -z "$TARGET_SERVICE" ] && [ ${#CUSTOM_STACKS[@]} -eq 0 ]; then
+    take_down_stack "$TARGET_STACK" 90
+    if [ "$DO_CLEAN" -eq 1 ]; then
+       docker system prune -f --volumes 2>&1 | log_output
+    fi
+    update_ui "Stack $TARGET_STACK Purged." 100
+    finish_action_sequence "down"
+
+  elif [ -n "$TARGET_STACK" ] && [ -n "$TARGET_SERVICE" ]; then
+    CURRENT_STACK="$TARGET_STACK"
+    CURRENT_SERVICE="$TARGET_SERVICE"
+    update_ui "Stopping service..." 40
+    force_arg=""
+    if [ "$DO_FORCE" -eq 1 ]; then force_arg="--timeout 1"; fi
+    docker compose -f "$STACKS_DIR/$TARGET_STACK.yml" stop $force_arg "$TARGET_SERVICE" 2>&1 | log_output
+    update_ui "Removing service container..." 80
+    docker compose -f "$STACKS_DIR/$TARGET_STACK.yml" rm -f "$TARGET_SERVICE" 2>&1 | log_output
+    update_ui "Service Purged." 100
+    finish_action_sequence "down"
+    
+  elif [ ${#CUSTOM_STACKS[@]} -gt 0 ]; then
+    total_stacks=${#CUSTOM_STACKS[@]}
+    pct_per_stack=0
+    if [ "$total_stacks" -gt 0 ]; then pct_per_stack=$(( 100 / total_stacks )); fi
+    
+    for (( idx=total_stacks-1; idx>=0; idx-- )); do
+      stack="${CUSTOM_STACKS[$idx]}"
+      service="${CUSTOM_SERVICES[$idx]}"
+      if [ ! -f "$STACKS_DIR/$stack.yml" ]; then
+        update_ui "✘ Warning: Stack $stack.yml not found..." "$CURRENT_PERCENT"
+        sleep 1.5
+        continue
+      fi
+      if [ -n "$service" ]; then
+        CURRENT_STACK="$stack"
+        CURRENT_SERVICE="$service"
+        update_ui "Stopping service..." "$CURRENT_PERCENT"
+        force_arg=""
+        if [ "$DO_FORCE" -eq 1 ]; then force_arg="--timeout 1"; fi
+        docker compose -f "$STACKS_DIR/$stack.yml" stop $force_arg "$service" 2>&1 | log_output
+        docker compose -f "$STACKS_DIR/$stack.yml" rm -f "$service" 2>&1 | log_output
+        CURRENT_PERCENT=$(( CURRENT_PERCENT + pct_per_stack ))
+      else
+        take_down_stack "$stack" "$pct_per_stack"
+      fi
+      if [ $idx -gt 0 ]; then
+        smart_wait $DELAY
+      fi
+    done
+    update_ui "Custom Stacks Purged." 100
+    finish_action_sequence "down"
+  fi
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: START / STOP / RESTART
+# ---------------------------------------------------------
+elif [[ "$COMMAND" =~ ^(start|stop|restart)$ ]]; then
+  OP_STACKS=("${STACKS[@]}")
+  if [ "$COMMAND" == "stop" ]; then
+    OP_STACKS=("${REVERSED_STACKS[@]}")
+  fi
+
+  if [ -z "$TARGET_STACK" ] && [ ${#CUSTOM_STACKS[@]} -eq 0 ]; then
+    total_stacks=${#OP_STACKS[@]}
+    pct_per_stack=0
+    if [ "$total_stacks" -gt 0 ]; then pct_per_stack=$(( 100 / total_stacks )); fi
+    for stack in "${OP_STACKS[@]}"; do
+      manage_stack "$COMMAND" "$stack" "$pct_per_stack"
+      smart_wait $DELAY
+    done
+    update_ui "All Stacks ${COMMAND}ed." 100
+    finish_action_sequence "$COMMAND"
+
+  elif [ -n "$TARGET_STACK" ] && [ -z "$TARGET_SERVICE" ] && [ ${#CUSTOM_STACKS[@]} -eq 0 ]; then
+    manage_stack "$COMMAND" "$TARGET_STACK" 100
+    update_ui "Stack $TARGET_STACK ${COMMAND}ed." 100
+    finish_action_sequence "$COMMAND"
+
+  elif [ -n "$TARGET_STACK" ] && [ -n "$TARGET_SERVICE" ]; then
+    CURRENT_STACK="$TARGET_STACK"
+    CURRENT_SERVICE="$TARGET_SERVICE"
+    update_ui "${COMMAND^}ing service..." 50
+    action_args=""
+    if [ "$DO_FORCE" -eq 1 ] && [[ "$COMMAND" =~ ^(stop|restart)$ ]]; then 
+        action_args="--timeout 1"
+    fi
+    docker compose -f "$STACKS_DIR/$TARGET_STACK.yml" "$COMMAND" $action_args "$TARGET_SERVICE" 2>&1 | log_output
+    update_ui "Service ${COMMAND}ed." 100
+    finish_action_sequence "$COMMAND"
+
+  elif [ ${#CUSTOM_STACKS[@]} -gt 0 ]; then
+    total_stacks=${#CUSTOM_STACKS[@]}
+    pct_per_stack=0
+    if [ "$total_stacks" -gt 0 ]; then pct_per_stack=$(( 100 / total_stacks )); fi
+    
+    if [ "$COMMAND" == "stop" ]; then
+      for (( idx=total_stacks-1; idx>=0; idx-- )); do
+        stack="${CUSTOM_STACKS[$idx]}"
+        service="${CUSTOM_SERVICES[$idx]}"
+        if [ ! -f "$STACKS_DIR/$stack.yml" ]; then
+          update_ui "✘ Warning: Stack $stack.yml not found..." "$CURRENT_PERCENT"
+          sleep 1.5
+          continue
+        fi
+        if [ -n "$service" ]; then
+          CURRENT_STACK="$stack"
+          CURRENT_SERVICE="$service"
+          action_args=""
+          if [ "$DO_FORCE" -eq 1 ]; then action_args="--timeout 1"; fi
+          docker compose -f "$STACKS_DIR/$stack.yml" "$COMMAND" $action_args "$service" 2>&1 | log_output
+          CURRENT_PERCENT=$(( CURRENT_PERCENT + pct_per_stack ))
+        else
+          manage_stack "$COMMAND" "$stack" "$pct_per_stack"
+        fi
+        if [ $idx -gt 0 ]; then smart_wait $DELAY; fi
+      done
+    else
+      for idx in "${!CUSTOM_STACKS[@]}"; do
+        stack="${CUSTOM_STACKS[$idx]}"
+        service="${CUSTOM_SERVICES[$idx]}"
+        if [ ! -f "$STACKS_DIR/$stack.yml" ]; then
+          update_ui "✘ Warning: Stack $stack.yml not found..." "$CURRENT_PERCENT"
+          sleep 1.5
+          continue
+        fi
+        if [ -n "$service" ]; then
+          CURRENT_STACK="$stack"
+          CURRENT_SERVICE="$service"
+          action_args=""
+          if [ "$DO_FORCE" -eq 1 ] && [[ "$COMMAND" =~ ^(stop|restart)$ ]]; then action_args="--timeout 1"; fi
+          docker compose -f "$STACKS_DIR/$stack.yml" "$COMMAND" $action_args "$service" 2>&1 | log_output
+          CURRENT_PERCENT=$(( CURRENT_PERCENT + pct_per_stack ))
+        else
+          manage_stack "$COMMAND" "$stack" "$pct_per_stack"
+        fi
+        if [ $idx -lt $((total_stacks - 1)) ]; then smart_wait $DELAY; fi
+      done
+    fi
+    update_ui "Custom Stacks ${COMMAND}ed." 100
+    finish_action_sequence "$COMMAND"
+  fi
+fi
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: SNAPSHOT
+# Usage: stacks snapshot [take|restore|list] [label]
+# ---------------------------------------------------------
+if [ "$COMMAND" == "snapshot" ]; then
+  SNAP_ACTION="${TARGET_ARGS[0]:-take}"
+  SNAP_LABEL="${TARGET_ARGS[1]:-golden}"
+  
+  # init_ui already called by show_header
+  CURRENT_STACK="Snapshot"
+  CURRENT_SERVICE="Engine"
+
+  case "$SNAP_ACTION" in
+    take|save|update)
+      update_ui "📸 Snapshot taken..." 50
+      mkdir -p "$SNAPSHOT_DIR"
+      take_snapshot "$SNAP_LABEL" >/dev/null
+      update_ui "✔ Snapshot taken and verified." 100
+      ;;
+    restore|revert)
+      update_ui "🔄 Snapshot restored..." 50
+      restore_snapshot "$SNAPSHOT_DIR/golden_latest"
+      update_ui "✔ Snapshot restored successfully." 100
+      ;;
+    list|ls)
+      clear_ui
+      list_snapshots
+      ;;
+    clear|purge)
+      update_ui "🧹 Snapshots cleared..." 50
+      sudo chmod -R 777 "$SNAPSHOT_DIR" >/dev/null 2>&1 || true
+      sudo find "$SNAPSHOT_DIR" -maxdepth 1 -mindepth 1 -not -name "golden_latest" -exec sudo rm -rf {} + >/dev/null 2>&1 || true
+      update_ui "✔ Our snapshots cleared." 100
+      ;;
+    *)
+      clear_ui
+      echo -e "\e[1;33mUsage: stacks snapshot [take|restore|list] [label]\e[0m"
+      ;;
+  esac
+  finish_action_sequence "snapshot"
+# ---------------------------------------------------------
+# COMMAND BRANCH: RM (REMOVE)
+# Usage: stacks rm [containers|networks|volumes|images|all] [stack] [force]
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "rm" ]; then
+  init_ui
+  CURRENT_STACK="${TARGET_STACK:-System}"
+  CURRENT_SERVICE="Cleanup"
+  RM_SUB="${TARGET_ARGS[0]:-containers}"
+  RM_NAME="${TARGET_ARGS[1]:-}"
+  force_flag=""; [ "$DO_FORCE" -eq 1 ] && force_flag="--force"
+
+  # ── stacks rm net_2 (stack name as first arg = full stack purge) ──
+  if [ -f "$STACKS_DIR/$RM_SUB.yml" ] || [ -f "$STACKS_DIR/${RM_SUB//_/-}.yml" ]; then
+    _rm_stack="$RM_SUB"
+    [ -f "$STACKS_DIR/${RM_SUB//_/-}.yml" ] && _rm_stack="${RM_SUB//_/-}"
+    CURRENT_STACK="$_rm_stack"
+    update_ui "Stopping stack $_rm_stack..." 15
+    docker compose -f "$STACKS_DIR/$_rm_stack.yml" stop 2>&1 | log_output
+    update_ui "Removing containers..." 35
+    docker compose -f "$STACKS_DIR/$_rm_stack.yml" rm -f 2>&1 | log_output
+    update_ui "Removing networks..." 55
+    docker compose -f "$STACKS_DIR/$_rm_stack.yml" down --remove-orphans 2>&1 | log_output
+    update_ui "Removing volumes..." 75
+    _vols=$(docker compose -f "$STACKS_DIR/$_rm_stack.yml" config --volumes 2>/dev/null)
+    for v in $_vols; do docker volume rm $force_flag "$v" 2>&1 | log_output || true; done
+    update_ui "Stack $_rm_stack fully removed." 100
+
+  # ── stacks rm volume NAME|all ──
+  elif [[ "${RM_SUB,,}" =~ ^(volume|vol|v)$ ]]; then
+    if [[ "${RM_NAME,,}" == "all" ]] || [ -z "$RM_NAME" ]; then
+      update_ui "Removing all volumes..." 20
+      [ "$DO_FORCE" -eq 1 ] && docker volume prune -f --all 2>&1 | log_output || docker volume prune -f 2>&1 | log_output
+    else
+      update_ui "Removing volume $RM_NAME..." 50
+      docker volume rm $force_flag "$RM_NAME" 2>&1 | log_output
+    fi
+    update_ui "Volume(s) removed." 100
+
+  # ── stacks rm network NAME|all ──
+  elif [[ "${RM_SUB,,}" =~ ^(network|net|n)$ ]]; then
+    if [[ "${RM_NAME,,}" == "all" ]] || [ -z "$RM_NAME" ]; then
+      update_ui "Pruning all unused networks..." 20
+      docker network prune -f 2>&1 | log_output
+    else
+      update_ui "Removing network $RM_NAME..." 50
+      docker network rm $force_flag "$RM_NAME" 2>&1 | log_output
+    fi
+    update_ui "Network(s) removed." 100
+
+  # ── stacks rm image NAME ──
+  elif [[ "${RM_SUB,,}" =~ ^(image|img|i)$ ]]; then
+    if [[ "${RM_NAME,,}" == "all" ]] || [ -z "$RM_NAME" ]; then
+      update_ui "Pruning images..." 20
+      [ "$DO_FORCE" -eq 1 ] && docker image prune -f --all 2>&1 | log_output || docker image prune -f 2>&1 | log_output
+    else
+      update_ui "Removing image $RM_NAME..." 50
+      docker image rm $force_flag "$RM_NAME" 2>&1 | log_output
+    fi
+    update_ui "Image(s) removed." 100
+
+  # ── stacks rm containers|all (original behaviour) ──
+  elif [[ "${RM_SUB,,}" =~ ^(containers|c)$ ]]; then
+    update_ui "Removing stopped containers..." 20
+    if [ -n "$TARGET_STACK" ]; then
+      docker compose -f "$STACKS_DIR/$TARGET_STACK.yml" rm -f 2>&1 | log_output
+    else
+      docker container prune -f 2>&1 | log_output
+    fi
+    update_ui "Containers removed." 100
+
+  elif [[ "${RM_SUB,,}" =~ ^(all|a)$ ]]; then
+    update_ui "Full system prune..." 10
+    docker container prune -f 2>&1 | log_output
+    update_ui "Containers done..." 30
+    docker network prune -f 2>&1 | log_output
+    update_ui "Networks done..." 50
+    docker volume prune -f 2>&1 | log_output
+    update_ui "Volumes done..." 70
+    docker image prune -f 2>&1 | log_output
+    update_ui "Full prune complete." 100
+
+  else
+    clear_ui
+    echo -e "\e[1;31m✘ Unknown rm target: $RM_SUB\e[0m"
+    echo -e "\e[1;33mUsage: stacks rm [stackname|volume|network|image|containers|all] [name] [force]\e[0m"
+    exit 1
+  fi
+  finish_action_sequence "rm"
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: GET (pull image)
+# Usage: stacks get imagename
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "get" ]; then
+  _img="${TARGET_ARGS[0]:-}"
+  if [ -z "$_img" ]; then
+    echo -e "\e[1;31m✘ Usage: stacks get <imagename>\e[0m"; exit 1
+  fi
+  init_ui
+  CURRENT_STACK="Docker Hub"
+  CURRENT_SERVICE="$_img"
+  update_ui "Pulling image $_img..." 20
+  run_live_cmd "Pulling" 20 docker pull "$_img"
+  update_ui "Image $_img pulled." 100
+  finish_action_sequence "up"
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: KILL
+# Usage: stacks kill containername  OR  stacks kill stackname
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "kill" ]; then
+  _ktarget="${TARGET_ARGS[0]:-}"
+  if [ -z "$_ktarget" ]; then
+    echo -e "\e[1;31m✘ Usage: stacks kill <container|stack>\e[0m"; exit 1
+  fi
+  init_ui
+  CURRENT_STACK="$_ktarget"
+  CURRENT_SERVICE="Kill"
+  _kstack="${_ktarget//_/-}"
+  if [ -f "$STACKS_DIR/$_ktarget.yml" ] || [ -f "$STACKS_DIR/$_kstack.yml" ]; then
+    _kf="$STACKS_DIR/$_ktarget.yml"
+    [ ! -f "$_kf" ] && _kf="$STACKS_DIR/$_kstack.yml"
+    update_ui "Killing stack $_ktarget..." 30
+    docker compose -f "$_kf" kill 2>&1 | log_output
+    update_ui "Stack $_ktarget killed." 100
+  else
+    update_ui "Killing container $_ktarget..." 50
+    docker kill "$_ktarget" 2>&1 | log_output
+    update_ui "Container $_ktarget killed." 100
+  fi
+  finish_action_sequence "down"
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: STATUS
+# Usage: stacks status
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "status" ]; then
+  printf "\e[?25h"
+  echo -e "\n\e[1;35m╔══════════════════════════════════════════════════════╗\e[0m"
+  echo -e "\e[1;35m║\e[0m  \e[1;36m📊 STACK STATUS\e[0m                                     \e[1;35m║\e[0m"
+  echo -e "\e[1;35m╠══════════════════════════════════════════════════════╣\e[0m"
+  printf "\e[1;35m║\e[0m  \e[1;33m%-18s %-8s %-8s %-10s\e[0m     \e[1;35m║\e[0m\n" "STACK" "RUNNING" "TOTAL" "STATUS"
+  echo -e "\e[1;35m╠══════════════════════════════════════════════════════╣\e[0m"
+  for stack in "${STACKS[@]}"; do
+    _f="$STACKS_DIR/$stack.yml"
+    [ ! -f "$_f" ] && continue
+    _total=$(docker compose -f "$_f" ps -a -q 2>/dev/null | wc -l)
+    _running=$(docker compose -f "$_f" ps -q 2>/dev/null | wc -l)
+    _unhealthy=$(docker compose -f "$_f" ps 2>/dev/null | grep -c "unhealthy" || true)
+    if [ "$_running" -eq 0 ] && [ "$_total" -eq 0 ]; then
+      _status="\e[1;90mOFFLINE\e[0m"
+    elif [ "$_running" -lt "$_total" ]; then
+      _status="\e[1;33mDEGRADED\e[0m"
+    elif [ "$_unhealthy" -gt 0 ]; then
+      _status="\e[1;31mUNHEALTHY\e[0m"
+    else
+      _status="\e[1;32mHEALTHY\e[0m"
+    fi
+    printf "\e[1;35m║\e[0m  %-18s %-8s %-8s %b%-*s\e[1;35m║\e[0m\n" "$stack" "$_running" "$_total" "$_status" 7 " "
+  done
+  echo -e "\e[1;35m╚══════════════════════════════════════════════════════╝\e[0m\n"
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: LOGS
+# Usage: stacks logs containername
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "logs" ]; then
+  _ltarget="${TARGET_ARGS[0]:-}"
+  if [ -z "$_ltarget" ]; then
+    echo -e "\e[1;31m✘ Usage: stacks logs <container|stack>\e[0m"; exit 1
+  fi
+  printf "\e[?25h"
+  _lstack="${_ltarget//_/-}"
+  if [ -f "$STACKS_DIR/$_ltarget.yml" ] || [ -f "$STACKS_DIR/$_lstack.yml" ]; then
+    _lf="$STACKS_DIR/$_ltarget.yml"
+    [ ! -f "$_lf" ] && _lf="$STACKS_DIR/$_lstack.yml"
+    docker compose -f "$_lf" logs --tail=100 -f --no-color 2>&1 | sed \
+      -e 's/\(ERROR\|error\|FATAL\|fatal\)/\o033[1;31m\1\o033[0m/g' \
+      -e 's/\(WARN\|warn\|WARNING\)/\o033[1;33m\1\o033[0m/g' \
+      -e 's/\(INFO\|info\)/\o033[1;32m\1\o033[0m/g'
+  else
+    docker logs --tail=100 -f "$_ltarget" 2>&1 | sed \
+      -e 's/\(ERROR\|error\|FATAL\|fatal\)/\o033[1;31m\1\o033[0m/g' \
+      -e 's/\(WARN\|warn\|WARNING\)/\o033[1;33m\1\o033[0m/g' \
+      -e 's/\(INFO\|info\)/\o033[1;32m\1\o033[0m/g'
+  fi
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: INSPECT
+# Usage: stacks inspect containername
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "inspect" ]; then
+  _itarget="${TARGET_ARGS[0]:-}"
+  if [ -z "$_itarget" ]; then
+    echo -e "\e[1;31m✘ Usage: stacks inspect <containername>\e[0m"; exit 1
+  fi
+  printf "\e[?25h"
+  docker inspect "$_itarget" 2>/dev/null | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+if not data: print('Container not found'); sys.exit(1)
+c = data[0]
+cfg = c.get('Config',{})
+net = c.get('NetworkSettings',{})
+mnt = c.get('Mounts',[])
+st  = c.get('State',{})
+print('\n\033[1;35m╔══════════════════════════════════════════════╗\033[0m')
+print(f'\033[1;35m║\033[0m  \033[1;36m🔍 {c[\"Name\"].lstrip(\"/\")}\033[0m')
+print(f'\033[1;35m║\033[0m  Image:   \033[1;33m{cfg.get(\"Image\",\"?\")}\033[0m')
+print(f'\033[1;35m║\033[0m  Status:  \033[1;32m{st.get(\"Status\",\"?\")}\033[0m  Started: {st.get(\"StartedAt\",\"?\")[:19]}')
+ports = net.get('Ports',{})
+for p,v in ports.items():
+    if v:
+        for b in v: print(f'\033[1;35m║\033[0m  Port:    {b.get(\"HostIp\",\"0.0.0.0\")}:{b.get(\"HostPort\",\"?\")} -> {p}')
+for nname, ndata in net.get('Networks',{}).items():
+    print(f'\033[1;35m║\033[0m  Network: \033[1;34m{nname}\033[0m  IP: {ndata.get(\"IPAddress\",\"?\")}')
+for m in mnt:
+    print(f'\033[1;35m║\033[0m  Volume:  {m.get(\"Source\",\"?\")} -> {m.get(\"Destination\",\"?\")}')
+print('\033[1;35m╚══════════════════════════════════════════════╝\033[0m')
+"
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: PULL (images for a stack, no deploy)
+# Usage: stacks pull stackname
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "pull" ]; then
+  _ptarget="${TARGET_ARGS[0]:-}"
+  if [ -z "$_ptarget" ]; then
+    echo -e "\e[1;31m✘ Usage: stacks pull <stackname>\e[0m"; exit 1
+  fi
+  _pstack="${_ptarget//_/-}"
+  _pf="$STACKS_DIR/$_ptarget.yml"
+  [ ! -f "$_pf" ] && _pf="$STACKS_DIR/$_pstack.yml"
+  if [ ! -f "$_pf" ]; then
+    echo -e "\e[1;31m✘ Stack $_ptarget not found.\e[0m"; exit 1
+  fi
+  init_ui
+  CURRENT_STACK="$_ptarget"
+  CURRENT_SERVICE="Pull Only"
+  update_ui "Pulling images for $_ptarget..." 20
+  run_live_cmd "Pulling" 20 docker compose -f "$_pf" pull --ignore-pull-failures
+  update_ui "Pull complete." 100
+  finish_action_sequence "up"
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: LS
+# Usage: stacks ls
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "ls" ]; then
+  printf "\e[?25h"
+  echo -e "\n\e[1;35m📦 Known Stacks:\e[0m"
+  for s in "${STACKS[@]}"; do echo -e "  \e[1;36m$s\e[0m"; done
+  echo ""
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: VOLUME
+# Usage: stacks volume ls [stackname|containername]
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "volume" ]; then
+  printf "\e[?25h"
+  _vsub="${TARGET_ARGS[0]:-ls}"
+  _vfilter="${TARGET_ARGS[1]:-}"
+  if [[ "${_vsub,,}" == "ls" ]]; then
+    echo -e "\n\e[1;35m💾 Volumes\e[0m"
+    for f in "$STACKS_DIR"/*.yml; do
+      _sname=$(basename "$f" .yml)
+      # filter by stack name if given
+      if [ -n "$_vfilter" ] && [[ "$_sname" != *"$_vfilter"* ]]; then
+        # check if filter matches a container name inside
+        grep -q "container_name:.*$_vfilter" "$f" 2>/dev/null || continue
+      fi
+      _vols=$(docker compose -f "$f" config --volumes 2>/dev/null)
+      if [ -n "$_vols" ]; then
+        echo -e "  \e[1;36m$_sname\e[0m"
+        for v in $_vols; do echo -e "    \e[1;33m$v\e[0m"; done
+      fi
+    done
+    echo ""
+  fi
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: NETWORK
+# Usage: stacks network ls [stackname|containername]
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "network" ]; then
+  printf "\e[?25h"
+  _nsub="${TARGET_ARGS[0]:-ls}"
+  _nfilter="${TARGET_ARGS[1]:-}"
+  if [[ "${_nsub,,}" == "ls" ]]; then
+    echo -e "\n\e[1;35m🌐 Networks\e[0m"
+    for f in "$STACKS_DIR"/*.yml; do
+      _sname=$(basename "$f" .yml)
+      if [ -n "$_nfilter" ] && [[ "$_sname" != *"$_nfilter"* ]]; then
+        grep -q "container_name:.*$_nfilter" "$f" 2>/dev/null || continue
+      fi
+      _nets=$(docker compose -f "$f" config 2>/dev/null | grep -E "^networks:" -A 999 | grep "name:" | awk '{print $2}')
+      if [ -n "$_nets" ]; then
+        echo -e "  \e[1;36m$_sname\e[0m"
+        for n in $_nets; do echo -e "    \e[1;34m$n\e[0m"; done
+      fi
+    done
+    echo ""
+  fi
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: DYNAMICS
+# Usage: stacks dynamics ls [routers] [services] [middleware] (combinable)
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "dynamics" ]; then
+  printf "\e[?25h"
+  DYNAMICS_DIR="/srv/stacks/Configs/Dynamics"
+  _show_routers=0; _show_services=0; _show_middleware=0; _show_all=1
+  for _da in "${TARGET_ARGS[@]}"; do
+    case "${_da,,}" in
+      router|routers)    _show_routers=1;    _show_all=0 ;;
+      service|services)  _show_services=1;   _show_all=0 ;;
+      middleware|mid|mw) _show_middleware=1; _show_all=0 ;;
+    esac
+  done
+  [ $_show_all -eq 1 ] && _show_routers=1 && _show_services=1 && _show_middleware=1
+  echo -e "\n\e[1;35m⚡ Dynamics\e[0m"
+  for f in "$DYNAMICS_DIR"/*.yml; do
+    _dname=$(basename "$f")
+    echo -e "\n  \e[1;36m$_dname\e[0m"
+    python3 - "$f" "$_show_routers" "$_show_services" "$_show_middleware" << 'DYNEOF'
+import sys
+try:
+    import yaml
+    HAS_YAML=True
+except:
+    HAS_YAML=False
+import re
+
+fpath, sr, ss, sm = sys.argv[1], sys.argv[2]=="1", sys.argv[3]=="1", sys.argv[4]=="1"
+content = open(fpath).read()
+
+if HAS_YAML:
+    try:
+        data = yaml.safe_load(content)
+        http = data.get("http", {}) if data else {}
+        if sr:
+            for r in http.get("routers", {}).keys():
+                print(f"    \033[1;33m[router]\033[0m {r}")
+        if ss:
+            for s in http.get("services", {}).keys():
+                print(f"    \033[1;32m[service]\033[0m {s}")
+        if sm:
+            for m in http.get("middlewares", {}).keys():
+                print(f"    \033[1;34m[middleware]\033[0m {m}")
+        sys.exit(0)
+    except: pass
+
+# fallback: regex
+if sr:
+    for m in re.finditer(r'^\s{4}(\S+):\s*$', content, re.M):
+        ctx = content[max(0,m.start()-50):m.start()]
+        if "routers:" in ctx: print(f"    \033[1;33m[router]\033[0m {m.group(1)}")
+if ss:
+    for m in re.finditer(r'^\s{4}(\S+):\s*$', content, re.M):
+        ctx = content[max(0,m.start()-50):m.start()]
+        if "services:" in ctx: print(f"    \033[1;32m[service]\033[0m {m.group(1)}")
+if sm:
+    for m in re.finditer(r'^\s{4}(\S+):\s*$', content, re.M):
+        ctx = content[max(0,m.start()-50):m.start()]
+        if "middlewares:" in ctx: print(f"    \033[1;34m[middleware]\033[0m {m.group(1)}")
+DYNEOF
+  done
+  echo ""
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: BUILD
+# Usage: stacks build <image> <containername> <stackname>
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "build" ]; then
+  stty echo 2>/dev/null
+  printf "\e[?25h"
+  _blog="/tmp/stacks_build_out_$$"
+  python3 /usr/local/lib/stacks_build.py "${TARGET_ARGS[@]}" </dev/tty | tee "$_blog"
+  stty echo 2>/dev/null
+  _start=$(grep "^BUILD_START:" "$_blog" 2>/dev/null | tail -1 | sed "s/BUILD_START://")
+  rm -f "$_blog"
+  if [ -n "$_start" ]; then
+    echo -e "\n\e[1;34m▶ Starting service...\e[0m"
+    stacks up $_start info
+  fi
+  exit 0
+
+
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: RELOAD
+# Usage: stacks reload
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "reload" ]; then
+  printf "\e[?25h"
+  echo -e "\e[1;34m▶ Reloading stacks script...\e[0m"
+  sudo chmod +x /usr/local/bin/stacks
+  if [ -f "$STACKS_CONF" ]; then
+    source "$STACKS_CONF"
+    echo -e "\e[1;32m✔ Config reloaded from $STACKS_CONF\e[0m"
+  else
+    echo -e "\e[1;33m⚠ No config file found at $STACKS_CONF, using defaults.\e[0m"
+  fi
+  echo -e "\e[1;32m✔ stacks reloaded. $(wc -l < /usr/local/bin/stacks) lines active.\e[0m"
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: CLEAN
+# Usage: stacks clean [mode]
+# Modes: quick, deep, images, volumes, networks, builder,
+#         sablier, all, nuke
+# Combinable: stacks clean images volumes builder
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "clean" ]; then
+  CLEAN_LOG="/srv/stacks/stacks_clean.log"
+  echo "=== Docker Clean Started: $(date) ===" > "$CLEAN_LOG"
+
+  # Parse which clean modes were requested
+  DO_QUICK=0; DO_IMAGES=0; DO_VOLUMES=0; DO_NETWORKS=0
+  DO_BUILDER=0; DO_NUKE=0; DO_ALL=0; DO_SABLIER=0
+  _clean_mode_set=0
+
+  for _ca in "${TARGET_ARGS[@]}"; do
+    case "${_ca,,}" in
+      quick)                DO_QUICK=1;   _clean_mode_set=1 ;;
+      deep)                 DO_IMAGES=1; DO_NETWORKS=1; DO_BUILDER=1; _clean_mode_set=1 ;;
+      images|img)           DO_IMAGES=1;  _clean_mode_set=1 ;;
+      volumes|vol|v)        DO_VOLUMES=1; _clean_mode_set=1 ;;
+      networks|net|n)       DO_NETWORKS=1; _clean_mode_set=1 ;;
+      builder|build|cache)  DO_BUILDER=1; _clean_mode_set=1 ;;
+      sablier)              DO_SABLIER=1; _clean_mode_set=1 ;;
+      all)                  DO_ALL=1;     _clean_mode_set=1 ;;
+      nuke)                 DO_NUKE=1; DO_ALL=1; _clean_mode_set=1 ;;
+    esac
+  done
+  # Default to deep clean if no mode given
+  if [ $_clean_mode_set -eq 0 ]; then
+    DO_IMAGES=1; DO_NETWORKS=1; DO_BUILDER=1
+  fi
+
+  init_ui
+  CURRENT_STACK="Docker"
+  CURRENT_SERVICE="Clean"
+  _pct=5
+
+  # Measure before
+  _before=$(sudo du -sb /var/lib/docker 2>/dev/null | awk '{print $1}')
+
+  # ── Get Sablier-managed containers to protect ──────────────────────
+  _sablier_managed=""
+  if [ $DO_SABLIER -eq 0 ]; then
+    _sablier_managed=$(docker ps -a --format '{{.Names}}' 2>/dev/null | xargs -I{} docker inspect {} --format '{{index .Config.Labels "sablier.enable"}} {{.Name}}' 2>/dev/null | grep "^true" | awk '{print $2}' | tr '\n' '|' | /usr/bin/sed 's/|$//')
+  fi
+
+  # ── Stuck containers (always cleaned) ─────────────────────────────
+  update_ui "Removing stuck/dead containers..." $_pct
+  _stuck=$(docker ps -a --filter "status=created" --filter "status=dead" --filter "status=removing" --format "{{.Names}}" 2>/dev/null)
+  for _sc in $_stuck; do
+    docker rm -f "$_sc" >> "$CLEAN_LOG" 2>&1 || true
+  done
+  _pct=15
+  echo -e "\n=== Stuck containers removed ===" >> "$CLEAN_LOG"
+
+  # ── Stopped containers ─────────────────────────────────────────────
+  update_ui "Pruning stopped containers..." $_pct
+  if [ -n "$_sablier_managed" ]; then
+    # prune only containers NOT in sablier list
+    docker ps -a --filter "status=exited" --format "{{.Names}}" 2>/dev/null | grep -vE "$_sablier_managed" | xargs -r docker rm -f >> "$CLEAN_LOG" 2>&1 || true
+  else
+    docker container prune -f >> "$CLEAN_LOG" 2>&1 || true
+  fi
+  _pct=25
+
+  # ── Networks ───────────────────────────────────────────────────────
+  if [ $DO_NETWORKS -eq 1 ] || [ $DO_ALL -eq 1 ] || [ $DO_QUICK -eq 1 ]; then
+    update_ui "Scrubbing orphaned networks..." $_pct
+    for _net in $(docker network ls --format '{{.Name}}' | grep -vE '^(bridge|host|none|ingress|docker_gwbridge)$'); do
+      _ctrs=$(docker network inspect "$_net" -f '{{range .Containers}}{{.Name}} {{end}}' 2>/dev/null)
+      for _nc in $_ctrs; do
+        docker network disconnect -f "$_net" "$_nc" >> "$CLEAN_LOG" 2>&1 || true
+      done
+    done
+    docker network prune -f >> "$CLEAN_LOG" 2>&1 || true
+    _pct=40
+    echo -e "\n=== Networks pruned ===" >> "$CLEAN_LOG"
+  fi
+
+  # ── Images ─────────────────────────────────────────────────────────
+  if [ $DO_IMAGES -eq 1 ] || [ $DO_ALL -eq 1 ]; then
+    update_ui "Removing dangling images..." $_pct
+    docker image prune -f >> "$CLEAN_LOG" 2>&1 || true
+    _pct=55
+    if [ $DO_ALL -eq 1 ] || [ $DO_NUKE -eq 1 ]; then
+      update_ui "Removing ALL unused images..." $_pct
+      docker image prune -a -f >> "$CLEAN_LOG" 2>&1 || true
+    fi
+    _pct=65
+    echo -e "\n=== Images pruned ===" >> "$CLEAN_LOG"
+  fi
+
+  # ── Builder cache ──────────────────────────────────────────────────
+  if [ $DO_BUILDER -eq 1 ] || [ $DO_ALL -eq 1 ]; then
+    update_ui "Wiping builder cache..." $_pct
+    docker builder prune -a -f >> "$CLEAN_LOG" 2>&1 || true
+    _pct=75
+    echo -e "\n=== Builder cache wiped ===" >> "$CLEAN_LOG"
+  fi
+
+  # ── Volumes ────────────────────────────────────────────────────────
+  if [ $DO_VOLUMES -eq 1 ] || [ $DO_NUKE -eq 1 ]; then
+    update_ui "Removing unused volumes..." $_pct
+    docker volume prune -f >> "$CLEAN_LOG" 2>&1 || true
+    _pct=85
+    echo -e "\n=== Volumes pruned ===" >> "$CLEAN_LOG"
+  fi
+
+  # ── Full system sweep ──────────────────────────────────────────────
+  if [ $DO_NUKE -eq 1 ]; then
+    update_ui "NUKE: Full system prune with volumes..." $_pct
+    docker system prune -a --volumes -f >> "$CLEAN_LOG" 2>&1 || true
+  elif [ $DO_ALL -eq 1 ]; then
+    update_ui "Full system sweep..." $_pct
+    docker system prune -a -f >> "$CLEAN_LOG" 2>&1 || true
+  else
+    update_ui "Final system sweep..." $_pct
+    docker system prune -f >> "$CLEAN_LOG" 2>&1 || true
+  fi
+
+  # ── Drop kernel caches ─────────────────────────────────────────────
+  echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+  sudo swapoff -a && sudo swapon -a 2>/dev/null || true
+
+  update_ui "Compiling report..." 95
+
+  # Measure after
+  _after=$(sudo du -sb /var/lib/docker 2>/dev/null | awk '{print $1}')
+  _saved=$(( _before - _after ))
+  if [ "$_saved" -gt 0 ]; then
+    _saved_gb=$(echo "scale=2; $_saved / 1024 / 1024 / 1024" | bc)
+  else
+    _saved_gb="0.00"
+  fi
+
+  update_ui "Clean complete. Freed ${_saved_gb}GB" 100
+  sleep 1
+  printf "\e[?25h"
+  clear_ui 2>/dev/null || true
+
+  echo -e "\n\e[1;32m✨ CLEAN COMPLETE ✨\e[0m"
+  echo -e "\e[1;36m┌──────────────────────────────────────────────┐\e[0m"
+  echo -e "\e[1;36m│\e[0m  \e[1;35m💾 Freed: \e[1;32m${_saved_gb} GB\e[0m"
+  echo -e "\e[1;36m└──────────────────────────────────────────────┘\e[0m\n"
+  docker system df
+  echo -e "\n\e[1;36m[ Press 'L' for full log, any other key to exit ]\e[0m"
+  read -r -n 1 -s _ck
+  if [[ "${_ck,,}" == "l" ]]; then less -R "$CLEAN_LOG"; fi
+  exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: SEARCH
+# Usage: stacks search [keyword]
+# Launches the interactive registry search TUI
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "regsearch" ]; then
+  printf "\e[?25h"
+  _skw="${TARGET_ARGS[0]:-}"
+  if [ ! -f /usr/local/lib/stacks_search.py ]; then
+    echo -e "\e[1;31m✘ stacks_search.py not found at /usr/local/lib/stacks_search.py\e[0m"
+    exit 1
+  fi
+  if [ -n "$_skw" ]; then
+    python3 /usr/local/lib/stacks_search.py "$_skw"
+  else
+    python3 /usr/local/lib/stacks_search.py
+  fi
+  exit 0
+
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: SEARCH
+# Usage:
+#   stacks search <term>              -- search all stacks
+#   stacks search <stackname> <term>  -- search one stack
+#   stacks search dynamic <term>      -- search dynamics
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "search" ]; then
+  printf "\e[?25h"
+  _s1="${TARGET_ARGS[0]:-}"
+  _s2="${TARGET_ARGS[1]:-}"
+
+  # Determine mode
+  if [ -z "$_s1" ]; then
+    echo -e "\e[1;31m✘ Usage: stacks search [stackname|dynamic] <term>\e[0m"
+    exit 1
+  fi
+
+  # stacks search dynamic <term>
+  if [[ "${_s1,,}" == "dynamic" ]] || [[ "${_s1,,}" == "dynamics" ]]; then
+    _term="$_s2"
+    if [ -z "$_term" ]; then
+      echo -e "\e[1;31m✘ Usage: stacks search dynamic <term>\e[0m"; exit 1
+    fi
+    echo -e "\n\e[1;35m🔍 Searching dynamics for: \e[1;33m$_term\e[0m\n"
+    _found=0
+    for _df in "$DYNAMICS_DIR"/*.yml; do
+      _dname=$(basename "$_df")
+      _matches=$(grep -n --color=never "$_term" "$_df" 2>/dev/null)
+      if [ -n "$_matches" ]; then
+        echo -e "\e[1;36m── $_dname ──\e[0m"
+        while IFS= read -r _ml; do
+          _lnum=$(echo "$_ml" | cut -d: -f1)
+          _ltext=$(echo "$_ml" | cut -d: -f2-)
+          _ltext=$(echo "$_ltext" | /usr/bin/sed "s/$_term/\x1b[1;33m$_term\x1b[0m/g")
+          echo -e "  \e[1;90mL${_lnum}\e[0m $_ltext"
+        done <<< "$_matches"
+        echo ""
+        _found=1
+      fi
+    done
+    [ $_found -eq 0 ] && echo -e "\e[1;31m No matches found in dynamics.\e[0m"
+    exit 0
+  fi
+
+  # stacks search <stackname> <term>  OR  stacks search <term>
+  _stack_f=""
+  _term=""
+
+  if [ -n "$_s2" ]; then
+    # Two args — first is stack name, second is term
+    _sn="${_s1//_/-}"
+    if [ -f "$STACKS_DIR/$_s1.yml" ]; then
+      _stack_f="$STACKS_DIR/$_s1.yml"
+    elif [ -f "$STACKS_DIR/$_sn.yml" ]; then
+      _stack_f="$STACKS_DIR/$_sn.yml"
+    else
+      echo -e "\e[1;31m✘ Stack $_s1 not found.\e[0m"; exit 1
+    fi
+    _term="$_s2"
+    echo -e "\n\e[1;35m🔍 Searching \e[1;36m$_s1\e[1;35m for: \e[1;33m$_term\e[0m\n"
+    _matches=$(grep -n --color=never "$_term" "$_stack_f" 2>/dev/null)
+    if [ -n "$_matches" ]; then
+      while IFS= read -r _ml; do
+        _lnum=$(echo "$_ml" | cut -d: -f1)
+        _ltext=$(echo "$_ml" | cut -d: -f2-)
+        _ltext=$(echo "$_ltext" | /usr/bin/sed "s/$_term/\x1b[1;33m$_term\x1b[0m/g")
+        echo -e "  \e[1;90mL${_lnum}\e[0m $_ltext"
+      done <<< "$_matches"
+    else
+      echo -e "\e[1;31m No matches for '$_term' in $_s1.\e[0m"
+    fi
+    exit 0
+  fi
+
+  # One arg — search ALL stacks
+  _term="$_s1"
+  echo -e "\n\e[1;35m🔍 Searching all stacks for: \e[1;33m$_term\e[0m\n"
+  _found=0
+  for _sf in "$STACKS_DIR"/*.yml; do
+    _sname=$(basename "$_sf" .yml)
+    _matches=$(grep -n --color=never "$_term" "$_sf" 2>/dev/null)
+    if [ -n "$_matches" ]; then
+      echo -e "\e[1;36m── $_sname ──\e[0m"
+      while IFS= read -r _ml; do
+        _lnum=$(echo "$_ml" | cut -d: -f1)
+        _ltext=$(echo "$_ml" | cut -d: -f2-)
+        _ltext=$(echo "$_ltext" | /usr/bin/sed "s/$_term/\x1b[1;33m$_term\x1b[0m/g")
+        echo -e "  \e[1;90mL${_lnum}\e[0m $_ltext"
+      done <<< "$_matches"
+      echo ""
+      _found=1
+    fi
+  done
+  [ $_found -eq 0 ] && echo -e "\e[1;31m No matches found in any stack.\e[0m"
+  exit 0
+
+
+elif [ "$COMMAND" == "art" ]; then
+  _art_action="${TARGET_ARGS[0]:-}"
+  # Parse: stacks art inject [all|art|urls|desc] [target]
+  # or:    stacks art inject [target]
+  _arg1="${TARGET_ARGS[1]:-all}"
+  _arg2="${TARGET_ARGS[2]:-}"
+  if [[ "$_arg1" =~ ^(all|art|urls|desc)$ ]]; then
+      _art_mode="$_arg1"
+      _art_target="${_arg2:---all}"
+  else
+      _art_mode="all"
+      _art_target="${_arg1:---all}"
+  fi
+  if [[ ! "$_art_action" =~ ^(inject|strip|backup)$ ]]; then
+      echo -e "\e[1;31m✘ Error: Specify 'inject' or 'strip' (e.g., stacks art inject)\e[0m"
+      exit 1
+  fi
+
+  # Call your UI Engine layouts natively
+  init_ui
+  CURRENT_STACK="Art Engine"
+  CURRENT_SERVICE="Processing"
+  
+  _ba_conf="~/.config/stacks/art.conf"
+  if [ -f "$_ba_conf" ]; then
+      eval $(grep "^DEFAULT_STACKS_DIR=" "$_ba_conf")
+  fi
+  _target_dir="${DEFAULT_STACKS_DIR:-/srv/stacks/Stacks}"
+
+  if [[ "$_art_target" == "--all" || "$_art_target" == "all" ]]; then
+      files=($(ls "$_target_dir"/*.yml "$_target_dir"/*.yaml 2>/dev/null))
+  else
+      if [ -f "$_art_target" ]; then files=("$_art_target")
+      elif [ -f "$_target_dir/$_art_target" ]; then files=("$_target_dir/$_art_target")
+      elif [ -f "$_target_dir/$_art_target.yml" ]; then files=("$_target_dir/$_art_target.yml")
+      else
+          clear_ui; printf "\e[?25h"
+          echo -e "\e[1;31m✘ Target stack path variant not found: $_art_target\e[0m"
+          exit 1
+      fi
+  fi
+
+  total_files=${#files[@]}
+  if [ $total_files -le 0 ]; then
+      clear_ui; printf "\e[?25h"
+      echo -e "\e[1;33m⚠ No matching stacks discovered to process.\e[0m"
+      exit 0
+  fi
+
+  for i in "${!files[@]}"; do
+      fname=$(basename "${files[$i]}")
+      pct=$(( (i * 100) / total_files ))
+      
+      if [ "$_art_action" == "inject" ]; then
+          update_ui "🎨 Injected beautifully ➜ $fname" "$pct"
+      else
+          update_ui "🧹 Stripped clean ➜ $fname" "$pct"
+      fi
+      
+      if [[ "$_art_action" == "strip" ]]; then
+          python3 /usr/local/lib/stacks_inject.py "strip" "${files[$i]}" >/dev/null 2>&1
+          python3 /usr/local/lib/stacks_describe.py "strip" "${files[$i]}" >/dev/null 2>&1
+          # Remove air gaps — collapse multiple blank lines into one
+          python3 -c "
+import re, sys
+f=sys.argv[1]
+t=open(f).read()
+t=re.sub(r'\n{3,}','\n\n',t)
+open(f,'w').write(t)
+" "${files[$i]}" 2>/dev/null
+      else
+          if [[ "$_art_mode" == "all" || "$_art_mode" == "art" ]]; then
+              python3 /usr/local/lib/stacks_inject.py "inject" "${files[$i]}" "$_art_mode" >/dev/null 2>&1
+          fi
+          if [[ "$_art_mode" == "all" || "$_art_mode" == "urls" ]]; then
+              python3 /usr/local/lib/stacks_inject.py "inject_urls" "${files[$i]}" >/dev/null 2>&1
+          fi
+          if [[ "$_art_mode" == "all" || "$_art_mode" == "desc" ]]; then
+              python3 /usr/local/lib/stacks_describe.py "${files[$i]}" >/dev/null 2>&1
+          fi
+      fi
+      sleep 0.12
+  done
+
+  update_ui "✨ Art sequence completed beautifully! ✨" "100"
+  sleep 1.5
+  clear_ui
+  printf "\e[?25h"
+  echo -e "\e[1;32m✨ SUCCESS: Stacks art engine updated all targets natively! ✨\e[0m"
+  exit 0
+
+elif [[ "$COMMAND" == "inject" || "$COMMAND" == "strip" ]]; then
+  printf "\e[?25h"
+  _ba_target="${TARGET_ARGS[0]:---all}"
+  _ba_conf="~/.config/stacks/art.conf"
+  python3 /usr/local/lib/stacks_inject.py "$COMMAND" "$_ba_target" "$STACKS_DIR" "$_ba_conf"
+  exit 0
+
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: BACKUP
+# Usage:
+#   stacks backup               -- backup everything in config
+#   stacks backup all           -- same as above
+#   stacks backup rm all        -- delete all backups in dest
+#   stacks backup rm <filename> -- delete specific backup
+# Config: ~/.config/stacks/backup.conf
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "backup" ]; then
+  printf "\e[?25h"
+  _bk_conf="~/.config/stacks/backup.conf"
+  _bk_sub="${TARGET_ARGS[0]:-all}"
+  _bk_arg2="${TARGET_ARGS[1]:-}"
+
+  if [ ! -f "$_bk_conf" ]; then
+    echo -e "\e[1;31m✘ No backup config at $_bk_conf\e[0m"
+    echo -e "\e[1;33mCreate it with BACKUP_DEST, FILES=(), and FOLDERS=()\e[0m"
+    exit 1
+  fi
+
+  source "$_bk_conf"
+  BACKUP_DEST="${BACKUP_DEST:-/home/user/Backup}"
+
+  # ── stacks backup /path/to/file ───────────────────────────
+  if [[ "$_bk_sub" == /* ]]; then
+    if [ ! -e "$_bk_sub" ]; then
+      echo -e "\e[1;31m✘ Not found: $_bk_sub\e[0m"; exit 1
+    fi
+    TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+    /usr/bin/mkdir -p "$BACKUP_DEST"
+    _bk_base=$(basename "$_bk_sub")
+    if [ -d "$_bk_sub" ]; then
+      /usr/bin/cp -rp "$_bk_sub" "$BACKUP_DEST/${_bk_base}_${TIMESTAMP}"
+    else
+      _ext="${_bk_base##*.}"; _name="${_bk_base%.*}"
+      if [[ "$_bk_base" == "$_ext" ]] || [[ "$_name" == "" ]]; then
+        /usr/bin/cp -p "$_bk_sub" "$BACKUP_DEST/${_bk_base}_${TIMESTAMP}"
+      else
+        /usr/bin/cp -p "$_bk_sub" "$BACKUP_DEST/${_name}_${TIMESTAMP}.${_ext}"
+      fi
+    fi
+    chown user:user "$BACKUP_DEST/${_bk_base}"* 2>/dev/null || true
+    echo -e "\e[1;32m✔ Backed up: $_bk_base → $BACKUP_DEST\e[0m"
+    exit 0
+  fi
+
+  # ── stacks backup clean ───────────────────────────────────
+  if [[ "${_bk_sub,,}" == "clean" ]]; then
+    echo -e "\n\e[1;31m⚠ This will delete ALL backups except the latest of each file.\e[0m"
+    echo -e "\e[1;33mAre you sure? (y/N)\e[0m"
+    read -r -n 1 -s _bk_confirm
+    if [[ "${_bk_confirm,,}" != "y" ]]; then
+      echo -e "\e[1;33mCancelled.\e[0m"; exit 0
+    fi
+    _kept=0; _deleted=0
+    declare -A _latest_map
+    # Find latest of each base file name
+    while IFS= read -r -d "" f; do
+      # Strip timestamp suffix to get base name
+      _base=$(basename "$f" | /usr/bin/sed 's/_[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}_[0-9]\{2\}-[0-9]\{2\}-[0-9]\{2\}//')
+      _cur="${_latest_map[$_base]:-}"
+      if [ -z "$_cur" ] || [ "$f" -nt "$_cur" ]; then
+        _latest_map[$_base]="$f"
+      fi
+    done < <(/usr/bin/find "$BACKUP_DEST" -maxdepth 1 -type f -print0 2>/dev/null)
+    # Also handle directories
+    while IFS= read -r -d "" f; do
+      _base=$(basename "$f" | /usr/bin/sed 's/_[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}_[0-9]\{2\}-[0-9]\{2\}-[0-9]\{2\}//')
+      _cur="${_latest_map[$_base]:-}"
+      if [ -z "$_cur" ] || [ "$f" -nt "$_cur" ]; then
+        _latest_map[$_base]="$f"
+      fi
+    done < <(/usr/bin/find "$BACKUP_DEST" -maxdepth 1 -type d -not -name "$(basename $BACKUP_DEST)" -print0 2>/dev/null)
+    # Delete everything that isnt the latest
+    while IFS= read -r -d "" f; do
+      _base=$(basename "$f" | /usr/bin/sed 's/_[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}_[0-9]\{2\}-[0-9]\{2\}-[0-9]\{2\}//')
+      if [ "${_latest_map[$_base]}" == "$f" ]; then
+        _kept=$((_kept+1))
+      else
+        /usr/bin/rm -rf "$f"
+        _deleted=$((_deleted+1))
+      fi
+    done < <(/usr/bin/find "$BACKUP_DEST" -maxdepth 1 \( -type f -o -type d \) -not -name "$(basename $BACKUP_DEST)" -print0 2>/dev/null)
+    echo -e "\e[1;32m✔ Clean complete — kept $_kept, deleted $_deleted files.\e[0m"
+    exit 0
+  fi
+
+  # ── stacks backup rm ──────────────────────────────────────
+  if [[ "${_bk_sub,,}" == "rm" ]]; then
+    if [[ "${_bk_arg2,,}" == "all" ]] || [ -z "$_bk_arg2" ]; then
+      echo -e "\n\e[1;31m⚠ Delete ALL backups in $BACKUP_DEST? [y/N]\e[0m"
+      read -r -n 1 -s _bk_confirm
+      if [[ "${_bk_confirm,,}" == "y" ]]; then
+        /usr/bin/rm -rf "${BACKUP_DEST:?}"/*
+        echo -e "\e[1;32m✔ All backups removed.\e[0m"
+      else
+        echo -e "\e[1;33mCancelled.\e[0m"
+      fi
+    else
+      _bk_target="$BACKUP_DEST/$_bk_arg2"
+      if [ -e "$_bk_target" ]; then
+        /usr/bin/rm -rf "$_bk_target"
+        echo -e "\e[1;32m✔ Removed: $_bk_target\e[0m"
+      else
+        echo -e "\e[1;31m✘ Not found: $_bk_target\e[0m"
+      fi
+    fi
+    exit 0
+  fi
+
+  # ── stacks backup [all] ────────────────────────────────────
+  TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+  /usr/bin/mkdir -p "$BACKUP_DEST"
+
+  ALL_ITEMS=()
+  for f in "${FILES[@]:-}"; do [ -e "$f" ] && ALL_ITEMS+=("FILE:$f"); done
+  for d in "${FOLDERS[@]:-}"; do [ -e "$d" ] && ALL_ITEMS+=("DIR:$d"); done
+
+  TOTAL=${#ALL_ITEMS[@]}
+  if [ "$TOTAL" -eq 0 ]; then
+    echo -e "\e[1;33m⚠ Nothing to back up. Check $_bk_conf\e[0m"
+    exit 0
+  fi
+
+  CURRENT_STACK="Backup"
+  CURRENT_SERVICE="Archive"
+
+  _bk_done=0
+  for item in "${ALL_ITEMS[@]}"; do
+    _bk_type="${item%%:*}"
+    _bk_path="${item#*:}"
+    _bk_base=$(basename "$_bk_path")
+    _bk_done=$(( _bk_done + 1 ))
+    _bk_pct=$(( _bk_done * 100 / TOTAL ))
+
+    CURRENT_SERVICE="${_bk_base:0:30}"
+    update_ui "Backing up: $_bk_base ($_bk_done/$TOTAL)" "$_bk_pct"
+
+    if [ "$_bk_type" == "DIR" ]; then
+      /usr/bin/cp -rp "$_bk_path" "$BACKUP_DEST/${_bk_base}_${TIMESTAMP}" 2>/dev/null || true
+    else
+      _ext="${_bk_base##*.}"
+      _name="${_bk_base%.*}"
+      if [[ "$_bk_base" == "$_ext" ]] || [[ "$_name" == "" ]]; then
+        /usr/bin/cp -p "$_bk_path" "$BACKUP_DEST/${_bk_base}_${TIMESTAMP}" 2>/dev/null || true
+      else
+        /usr/bin/cp -p "$_bk_path" "$BACKUP_DEST/${_name}_${TIMESTAMP}.${_ext}" 2>/dev/null || true
+      fi
+    fi
+    echo -e "  \e[1;32m✔\e[0m $_bk_base" >> "$INFO_LOG"
+    sleep 0.05
+  done
+
+  chown -R user:user "$BACKUP_DEST" 2>/dev/null || true
+  update_ui "Backup complete. $TOTAL items archived." 100
+  sleep 1
+  clear_ui
+  printf "\e[?25h"
+  echo -e "\e[1;32m✔ Backup complete — $TOTAL items archived.\e[0m"
+  if [ "$DO_INFO" -eq 1 ]; then
+    echo ""
+    cat "$INFO_LOG"
+  fi
+  exit 0
+
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: DESCRIBE
+# Usage:
+#   stacks describe stackname  -- add service descriptions
+#   stacks describe --all      -- all stacks
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "describe" ]; then
+  printf "\e[?25h"
+  _dt="${TARGET_ARGS[0]:-all}"
+  echo -e "\n\e[1;35m🤖 Generating service descriptions...\e[0m"
+  python3 /usr/local/lib/stacks_describe.py "$_dt"
+  exit 0
+
+
+elif [ "$COMMAND" == "gen" ]; then
+  printf "\e[?25h"
+  _gen_sub="${TARGET_ARGS[0]:-}"
+  if [[ "$_gen_sub" == "srvs" ]]; then
+    echo -e "\n\e[1;35m📋 Generating service list...\e[0m"
+    python3 /usr/local/lib/stacks_gen_srvs.py
+  else
+    echo -e "\e[1;33mUsage: stacks gen srvs\e[0m"
+  fi
+  exit 0
+
+
+elif [ "$COMMAND" == "fix" ]; then
+  printf "\e[?25h"
+  echo -e "\n\e[1;35m🔧 Running stack fixer...\e[0m"
+  if [ ${#PARSED_STACKS[@]} -gt 0 ]; then
+    # Multiple stacks specified
+    for _fidx in "${!PARSED_STACKS[@]}"; do
+      _fix_stack="${PARSED_STACKS[$_fidx]}"
+      _fix_svc="${PARSED_SERVICES[$_fidx]:-}"
+      if [ -n "$_fix_svc" ]; then
+        python3 /usr/local/lib/stacks_fix.py "$_fix_stack" "$_fix_svc"
+      else
+        python3 /usr/local/lib/stacks_fix.py "$_fix_stack"
+      fi
+    done
+  elif [ -n "$TARGET_STACK" ]; then
+    # Single stack
+    if [ -n "$TARGET_SERVICE" ]; then
+      python3 /usr/local/lib/stacks_fix.py "$TARGET_STACK" "$TARGET_SERVICE"
+    else
+      python3 /usr/local/lib/stacks_fix.py "$TARGET_STACK"
+    fi
+  else
+    # No target — fix all
+    python3 /usr/local/lib/stacks_fix.py all
+  fi
+  exit 0
+
+fi
