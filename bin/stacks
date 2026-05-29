@@ -20,6 +20,7 @@ FAILED_IMAGES_LOG="/tmp/stacks-failed-images-$(id -u).txt"
 PRIMARY_NETWORK="apartment_net"
 PRIMARY_SUBNET="172.20.0"
 DOMAIN="example.com"
+FIX_AUTO_SEARCH=1  # 1=registry search on image-pull failure during fix; 0=off
 
 # ── Load config if it exists ───────────────────────────────────────────────────
 if [ -f "$STACKS_CONF" ]; then
@@ -69,8 +70,8 @@ for arg in "$@"; do
     restart) DO_RESTART=1 ;;
     continue|contenu|contentue|contenue) DO_CONTINUE=1 ;;
     just|only|solo|single) ONLY_THIS_STACK=1 ;;
-    repair|repaire) DO_REPAIR=1; DO_FIX=1 ;;
-    fix) DO_REPAIR=1; DO_FIX=1 ;;
+    repair|repaire) DO_REPAIR=1 ;;
+    fix) DO_FIX=1 ;;
     no-fix) DO_REPAIR=1; DO_FIX=0 ;;
     restore) DO_RESTORE=1 ;;
     detach|d) DO_DETACH=1 ;;
@@ -251,6 +252,20 @@ init_ui() {
   printf "\033[3A"
 }
 
+reinit_ui() {
+  # Re-arm the loading-bar area WITHOUT reprinting the banner art.
+  # First wipe any prompt/question text left on screen from the image search.
+  stty -echo 2>/dev/null
+  printf "\r\033[K"          # clear current line
+  printf "\033[1A\033[K"     # up 1, clear (the prompt line)
+  printf "\033[1A\033[K"     # up 1, clear (the warn line)
+  printf "\033[1A\033[K"     # up 1, clear (spacer/blank)
+  echo ""
+  echo ""
+  echo ""
+  printf "\033[3A"
+}
+
 clear_ui() {
   printf "\r\033[K\n\r\033[K\n\r\033[K\n\r\033[K\r\033[3A"
 }
@@ -268,9 +283,9 @@ update_ui() {
   if [ $empty -lt 0 ]; then empty=0; fi
 
   # ── STACKS LOADING BAR ──────────────────────────────
-  local spin_chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+  local spin_frames=("⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏")
   local spin_idx=$(( SECONDS % 10 ))
-  local spinner=$(echo "$spin_chars" | cut -c$((spin_idx+1)))
+  local spinner="${spin_frames[$spin_idx]}"
 
   local current_bar=$(printf "%${filled}s" | tr " " "#")
   local current_space=$(printf "%${empty}s" | tr " " "-")
@@ -354,6 +369,8 @@ run_live_cmd() {
       if echo "$clean" | grep -qiE "Downloading|Pulling|Extracting|MB|kB|B/s"; then
         local dl=$(echo "$clean" | grep -oE "[0-9]+\.?[0-9]*\s*(MB|kB|GB|B)/s" | tail -1)
         local sz=$(echo "$clean" | grep -oE "[0-9]+\.?[0-9]*\s*(MB|kB|GB|B)" | tail -1)
+        local svc_name=$(echo "$clean" | grep -oiP "(?<=Pulling )[a-zA-Z0-9_\-\.]+" | head -1)
+        [ -n "$svc_name" ] && CURRENT_SERVICE="$svc_name"
         local msg="$base_action"
         [ -n "$sz" ] && msg="$msg ➜ $sz"
         [ -n "$dl" ] && msg="$msg @ $dl"
@@ -380,21 +397,82 @@ show_final_summary() {
   if [ -s "$FAILED_IMAGES_LOG" ]; then
     echo -e "\n\e[1;33m┌──────────────────────────────────────────────────────┐\e[0m"
     echo -e "\e[1;33m│\e[0m  \e[1;31m🚨 FAILED DEPLOYMENTS / IMAGES\e[0m                      \e[1;33m│\e[0m"
-    echo -e "\n\e[1;33m├──────────────────────────────────────────────────────┘\e[0m"
+    echo -e "\e[1;33m└──────────────────────────────────────────────────────┘\e[0m"
     cat "$FAILED_IMAGES_LOG"
     echo -e "\e[1;33m────────────────────────────────────────────────────────\e[0m"
   fi
 
-  if [ -s "$INFO_LOG" ]; then
+  if [ -s "$INFO_LOG" ] && [ "$DO_INFO" -eq 1 ]; then
     echo -e "\n\e[1;33m┌──────────────────────────────────────────────────────┐\e[0m"
     echo -e "\e[1;33m│\e[0m  \e[1;31m🚨 DETAILED DIAGNOSTICS (Log Summary)\e[0m               \e[1;33m│\e[0m"
-    echo -e "\e[1;33m├──────────────────────────────────────────────────────┘\e[0m"
+    echo -e "\e[1;33m└──────────────────────────────────────────────────────┘\e[0m"
     tail -n 30 "$INFO_LOG" | sed 's/^/   /'
     echo -e "\e[1;33m────────────────────────────────────────────────────────\e[0m"
+  elif [ -s "$INFO_LOG" ]; then
+    _failn=$(grep -c "✘" "$FAILED_IMAGES_LOG" 2>/dev/null || echo 0)
+    echo -e "\n\e[1;31m✘ Some services failed to deploy. Run with 'info' to see the log.\e[0m"
+  fi
+}
+
+image_search_repair() {
+  # Fix-path image repair: detect image-pull failure for one service,
+  # offer registry search, swap the image line, retry. Fix-only.
+  local stack="$1"
+  local svc="$2"
+  local file="$3"
+  [ "${_IMG_SEARCH_OFF:-0}" != "0" ] && return 1
+  [ "${FIX_AUTO_SEARCH:-1}" = "0" ] && return 1
+  [ -e /dev/tty ] && [ -r /dev/tty ] || return 1
+  [ -f /usr/local/lib/stacks_search.py ] || return 1
+  # Read the image straight from the file (no slow pull probe). The caller
+  # only invokes this for services that aren't running, so a real image is expected.
+  local _bad_img
+  _bad_img=$(awk -v s="$svc" '$0 ~ "^  " s ":[ \t]*$"{f=1;next} f&&/^  [a-zA-Z0-9]/{f=0} f&&/^[ \t]*image:[ \t]*/{sub(/^[ \t]*image:[ \t]*/,"");gsub(/["\x27]/,"");print;exit}' "$file")
+  clear_ui 2>/dev/null || true
+  stty echo 2>/dev/null || true
+  printf "\e[?25h"
+  printf "\e[1;33m\xe2\x9a\xa0 Image failed for %s: %s\e[0m\n" "$svc" "${_bad_img:-unknown}"
+  printf "\e[1;36mSearch the registry for a replacement image? [y/N] \e[0m"
+  local _ans=""
+  read -r _ans </dev/tty 2>/dev/null || _ans=""
+  if [ "${_ans,,}" != "y" ]; then
+    reinit_ui 2>/dev/null || true
+    _IMG_SEARCH_OFF=1
+    echo "[$stack -> $svc] image search declined; not asking again this run" >> "$INFO_LOG"
+    return 1
+  fi
+  rm -f /tmp/stacks_build_selected 2>/dev/null
+  python3 /usr/local/lib/stacks_search.py "$_bad_img" --select </dev/tty || true
+  local _new_img=""
+  [ -s /tmp/stacks_build_selected ] && _new_img=$(tr -d "[:space:]" < /tmp/stacks_build_selected)
+  rm -f /tmp/stacks_build_selected 2>/dev/null
+  local _svc_ln=""
+  _svc_ln=$(grep -nE "^  ${svc}:[[:space:]]*$" "$file" | head -n1 | cut -d: -f1)
+  local _img_ln=""
+  [ -n "$_svc_ln" ] && _img_ln=$(tail -n +"$_svc_ln" "$file" | grep -nE "^[[:space:]]*image:" | head -n1 | cut -d: -f1)
+  if [ -n "$_new_img" ] && [ "$_new_img" != "$_bad_img" ] && [ -n "$_svc_ln" ] && [ -n "$_img_ln" ]; then
+    cp "$file" "/srv/stacks/backups/$(basename "$file")_$(date +%Y-%m-%d_%H-%M-%S)" 2>/dev/null || true
+    local _abs_ln=$(( _svc_ln + _img_ln - 1 ))
+    sed -i "${_abs_ln}s|^\([[:space:]]*image:[[:space:]]*\).*|\1${_new_img}|" "$file"
+    printf "\e[1;32m\xe2\x9c\x94 Swapped image -> %s\e[0m\n" "$_new_img"
+    reinit_ui
+    if run_live_cmd "Retry $svc" "$CURRENT_PERCENT" docker compose -f "$file" up -d $UP_BASE_ARGS --force-recreate "$svc"; then
+      update_ui "\xe2\x9c\x94 $svc up after image swap!" "$CURRENT_PERCENT"
+      sed -i "/$svc/d" "$FAILED_IMAGES_LOG" 2>/dev/null
+      sleep 2
+      return 0
+    fi
+    return 1
+  else
+    reinit_ui 2>/dev/null || true
+    _IMG_SEARCH_OFF=1
+    echo "[$stack -> $svc] no image chosen; not asking again this run" >> "$INFO_LOG"
+    return 1
   fi
 }
 
 self_heal_service() {
+  local _img_handled=0
   local stack=$1
   local svc=$2
   local file="$STACKS_DIR/$stack.yml"
@@ -411,7 +489,7 @@ self_heal_service() {
   fi
   
   # Run automated Network & Volume Guardian layer to prevent topology drifts
-  python3 /usr/local/lib/stacks_network_guardian.py 2>/dev/null || true
+  python3 /usr/local/lib/stacks_network_guardian.py >/dev/null 2>&1 || true
   # ── CROSS-STACK DUPLICATE NAME KILLER ──────────────────────────────
   # Check if another stack has a running container with same name
   _dup_id=$(command docker ps -aq --filter "name=^/${svc}$" 2>/dev/null | head -1)
@@ -771,94 +849,16 @@ PYEOF
        sleep 1
   fi
 
-  # Auto-fix missing cross-container networks before deploy
-  _netfix_result=$( STACK_FILE="$STACKS_DIR/$stack.yml" STACKS_DIR="$STACKS_DIR" python3 - << 'PYEOF'
-import os, re
-
-stack_file = os.environ.get("STACK_FILE")
-stacks_dir = os.environ.get("STACKS_DIR")
-fixed = []
-
-# Build global container->networks map
-container_nets = {}
-container_file = {}
-for f in sorted(os.listdir(stacks_dir)):
-    if not f.endswith(".yml"): continue
-    try:
-        c = open(os.path.join(stacks_dir, f)).read()
-        blocks = re.split(r"\n  (?=[a-zA-Z0-9][a-zA-Z0-9_-]+:\n)", c)
-        for block in blocks:
-            nm = re.search(r"container_name:\s*(\S+)", block)
-            if not nm: continue
-            cname = nm.group(1)
-            nets = set(re.findall(r"      ([a-zA-Z0-9_-]+_net):", block))
-            container_nets[cname] = nets
-            container_file[cname] = f
-    except: pass
-
-# Check this stack file for missing connections
-try:
-    content = open(stack_file).read()
-    original = content
-    blocks = re.split(r"\n  (?=[a-zA-Z0-9][a-zA-Z0-9_-]+:\n)", content)
-    for block in blocks:
-        nm = re.search(r"container_name:\s*(\S+)", block)
-        if not nm: continue
-        cname = nm.group(1)
-        my_nets = container_nets.get(cname, set())
-        env_vals = re.findall(r"=([a-zA-Z0-9][a-zA-Z0-9_-]+)(?::[0-9]+)?", block)
-        for val in env_vals:
-            if val not in container_nets or val == cname: continue
-            their_nets = container_nets[val]
-            shared = my_nets & their_nets
-            if shared: continue
-            # Need a shared network - use base name of referenced container
-            base = val
-            for s in ["-db","-redis","-cache","-worker","-postgres","-mysql","-mongo","_db","_redis"]:
-                if val.endswith(s):
-                    base = val[:-len(s)]
-                    break
-            net_name = f"{base}_net"
-            # Add to this container in this file
-            def add_net(m, net_name=net_name, cname=cname):
-                blk = m.group(0)
-                if net_name in blk: return blk
-                blk = re.sub(
-                    r"(    networks:\n(?:      [^\n]+\n)*)",
-                    lambda nm2: nm2.group(0) + f"      {net_name}:\n        priority: 500\n" if net_name not in nm2.group(0) else nm2.group(0),
-                    blk
-                )
-                return blk
-            content = re.sub(
-                rf"(    container_name: {re.escape(cname)}\n(?:    [^\n]*\n)*)",
-                add_net, content
-            )
-            # Add to top-level networks
-            if net_name not in content:
-                content = re.sub(
-                    r"(networks:\n)",
-                    rf"\1  {net_name}: {{name: {net_name}, external: true}}\n",
-                    content, count=1
-                )
-            fixed.append(f"{cname}->{val} via {net_name}")
-    if content != original:
-        open(stack_file, "w").write(content)
-        for f in fixed:
-            print(f"NET_FIXED:{f}")
-except Exception as e:
-    print(f"NET_ERR:{e}")
-PYEOF
-)
-  if echo "$_netfix_result" | grep -q "NET_FIXED:"; then
-    echo "$_netfix_result" | grep "NET_FIXED:" | while read line; do
-      msg="${line#NET_FIXED:}"
-      update_ui "🔗 Auto-linked: $msg" "$p2"
-      echo "[net-autofix] $msg" | log_output
-      sleep 0.5
-    done
-  fi
-  if echo "$_netfix_result" | grep -q "NET_ERR:"; then
-    echo "$_netfix_result" | grep "NET_ERR:" | log_output
+  # Auto-define & create missing networks/volumes before deploy (uses stacks_fix.py)
+  if [ "$DO_FIX" -eq 1 ] && [ -f /usr/local/lib/stacks_fix.py ]; then
+    update_ui "🔍 Checking networks/volumes for $stack..." "$p2"
+    _fix_out=$(python3 /usr/local/lib/stacks_fix.py "$stack" 2>&1)
+    echo "$_fix_out" | log_output
+    if echo "$_fix_out" | grep -qE "added net|added vol|healed"; then
+      _added=$(echo "$_fix_out" | grep -oE "added.*" | head -1)
+      update_ui "🔗 Defined missing infra: ${_added:0:40}" "$p2"
+      sleep 0.8
+    fi
   fi
 
   update_ui "Pulling images for Stack $stack..." "$p2"
@@ -874,13 +874,26 @@ PYEOF
          update_ui "❌ STACK DEPLOY FAILED: $stack" "$CURRENT_PERCENT"
          sleep 2
     fi
+    if [ "$DO_FIX" -eq 1 ]; then
+      # Only prompt for services whose IMAGE actually failed to pull.
+      # Read the failed image names straight from the deploy output.
+      _failed_imgs=$(tail -n 200 "$LOG_FILE" | grep -oiE "pull access denied for [^,]+|repository does not exist|manifest unknown|manifest for [^ ]+ not found|no such image: [^ ]+" | grep -oiE "for [^ ,]+" | sed -E "s/^for //" | sort -u)
+      for _fsvc in $(awk '/^services:/{f=1;next}/^[a-z]/{f=0}f&&/^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/,"");print}' "$STACKS_DIR/$stack.yml" 2>/dev/null); do
+        # Get this service's image (name only, strip tag) and see if it is in the failed list
+        _svc_img=$(awk -v s="$_fsvc" '$0 ~ "^  " s ":[ \t]*$"{f=1;next} f&&/^  [a-zA-Z0-9]/{f=0} f&&/^[ \t]*image:[ \t]*/{sub(/^[ \t]*image:[ \t]*/,"");gsub(/["\x27]/,"");print;exit}' "$STACKS_DIR/$stack.yml")
+        _svc_img_noTag=$(echo "$_svc_img" | sed -E "s/:[^/]*$//")
+        if echo "$_failed_imgs" | grep -qiE "(^|/)$(basename "$_svc_img_noTag")(\b|$)" || echo "$_failed_imgs" | grep -qi "$_svc_img_noTag"; then
+          image_search_repair "$stack" "$_fsvc" "$STACKS_DIR/$stack.yml" || true
+        fi
+      done
+    fi
     if [ "$DO_REPAIR" -eq 1 ]; then
       update_ui "⚠️ Error detected in $stack. Repair Mode ACTIVE..." "$CURRENT_PERCENT"
       sleep 1.5
       # ── STUCK CONTAINER CLEANUP ─────────────────────────────────────────
       update_ui "🧹 Cleaning stuck containers..." "$CURRENT_PERCENT"
       # Only clean stuck containers belonging to THIS stack
-      _stack_svcs=$(grep -E '^[[:space:]]{2}[a-zA-Z0-9_-]+:' "$STACKS_DIR/$stack.yml" | grep -v 'profiles:' | awk -F: '{print $1}' | tr -d ' ' 2>/dev/null)
+      _stack_svcs=$(awk '/^services:/{flag=1; next} /^[a-z]/{flag=0} flag && /^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/, ""); print}' "$STACKS_DIR/$stack.yml" 2>/dev/null)
       _stuck=""
       for _ss in $_stack_svcs; do
         _sc=$(docker ps -a --filter "name=^${_ss}$" --filter "status=created" --format "{{.Names}}" 2>/dev/null)
@@ -916,18 +929,26 @@ PYEOF
       if [ "$ONLY_THIS_STACK" -eq 1 ] && [ -n "$start_svc" ]; then
         file_svcs="$start_svc"
       else
-        file_svcs=$(grep -E '^[[:space:]]{2}[a-zA-Z0-9_-]+:' "$STACKS_DIR/$stack.yml" | grep -v 'profiles:' | awk -F: '{print $1}' | tr -d ' ' 2>/dev/null)
+        file_svcs=$(awk '/^services:/{flag=1; next} /^[a-z]/{flag=0} flag && /^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/, ""); print}' "$STACKS_DIR/$stack.yml" 2>/dev/null)
         if [ -z "$file_svcs" ]; then
           file_svcs=$(docker compose -f "$STACKS_DIR/$stack.yml" config --services 2>/dev/null)
         fi
       fi
       
+      # Determine if the user named an ACTUAL service (not just the stack).
+      # Only then do we filter the repair to named services.
+      _has_svc_target=0
+      for target in "${TARGET_ARGS[@]}"; do
+        for _s in $file_svcs; do
+          if [ "$target" == "$_s" ]; then _has_svc_target=1; break 2; fi
+        done
+      done
+
       for svc in $file_svcs; do
-        # Surgically isolate ONLY the explicit services requested in your mega-string
-        if [ ${#TARGET_ARGS[@]} -gt 0 ]; then
+        # Only filter to named services if a real service name was given.
+        if [ "$_has_svc_target" -eq 1 ]; then
           local match_found=0
           for target in "${TARGET_ARGS[@]}"; do
-            # If the argument matches the service name exactly, let it through
             if [ "$target" == "$svc" ]; then
               match_found=1
               break
@@ -1519,6 +1540,26 @@ elif [ "$COMMAND" == "down" ]; then
 # ---------------------------------------------------------
 # COMMAND BRANCH: START / STOP / RESTART
 # ---------------------------------------------------------
+repair_stack_if_needed() {
+  local stack="$1"
+  [ "$DO_REPAIR" -ne 1 ] && return 0
+  local file="$STACKS_DIR/$stack.yml"
+  [ ! -f "$file" ] && return 0
+  local file_svcs
+  file_svcs=$(awk '/^services:/{flag=1; next} /^[a-z]/{flag=0} flag && /^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/, ""); print}' "$file" 2>/dev/null)
+  for svc in $file_svcs; do
+    if [ ${#TARGET_ARGS[@]} -gt 0 ] && [ -n "$TARGET_SERVICE" ]; then
+      [ "$svc" != "$TARGET_SERVICE" ] && continue
+    fi
+    local running unhealthy
+    running=$(command docker ps -q --filter "name=^${svc}$" --filter "status=running" 2>/dev/null | head -1)
+    unhealthy=$(command docker ps -q --filter "name=^${svc}$" --filter "health=unhealthy" 2>/dev/null | head -1)
+    if [ -n "$running" ] && [ -z "$unhealthy" ]; then continue; fi
+    CURRENT_SERVICE="[Repair] ${svc:0:30}"
+    update_ui "🔧 Repairing ${svc:0:35} after ${COMMAND}..." "$CURRENT_PERCENT"
+    self_heal_service "$stack" "$svc" || true
+  done
+}
 elif [[ "$COMMAND" =~ ^(start|stop|restart)$ ]]; then
   OP_STACKS=("${STACKS[@]}")
   if [ "$COMMAND" == "stop" ]; then
@@ -1531,6 +1572,7 @@ elif [[ "$COMMAND" =~ ^(start|stop|restart)$ ]]; then
     if [ "$total_stacks" -gt 0 ]; then pct_per_stack=$(( 100 / total_stacks )); fi
     for stack in "${OP_STACKS[@]}"; do
       manage_stack "$COMMAND" "$stack" "$pct_per_stack"
+      repair_stack_if_needed "$stack"
       smart_wait $DELAY
     done
     update_ui "All Stacks ${COMMAND}ed." 100
@@ -1538,6 +1580,7 @@ elif [[ "$COMMAND" =~ ^(start|stop|restart)$ ]]; then
 
   elif [ -n "$TARGET_STACK" ] && [ -z "$TARGET_SERVICE" ] && [ ${#CUSTOM_STACKS[@]} -eq 0 ]; then
     manage_stack "$COMMAND" "$TARGET_STACK" 100
+    repair_stack_if_needed "$TARGET_STACK"
     update_ui "Stack $TARGET_STACK ${COMMAND}ed." 100
     finish_action_sequence "$COMMAND"
 
@@ -1550,6 +1593,7 @@ elif [[ "$COMMAND" =~ ^(start|stop|restart)$ ]]; then
         action_args="--timeout 1"
     fi
     docker compose -f "$STACKS_DIR/$TARGET_STACK.yml" "$COMMAND" $action_args "$TARGET_SERVICE" 2>&1 | log_output
+    repair_stack_if_needed "$TARGET_STACK"
     update_ui "Service ${COMMAND}ed." 100
     finish_action_sequence "$COMMAND"
 
@@ -1651,7 +1695,6 @@ if [ "$COMMAND" == "snapshot" ]; then
 # Usage: stacks rm [containers|networks|volumes|images|all] [stack] [force]
 # ---------------------------------------------------------
 elif [ "$COMMAND" == "rm" ]; then
-  init_ui
   CURRENT_STACK="${TARGET_STACK:-System}"
   CURRENT_SERVICE="Cleanup"
   RM_SUB="${TARGET_ARGS[0]:-containers}"
@@ -1689,12 +1732,25 @@ elif [ "$COMMAND" == "rm" ]; then
   elif [[ "${RM_SUB,,}" =~ ^(network|net|n)$ ]]; then
     if [[ "${RM_NAME,,}" == "all" ]] || [ -z "$RM_NAME" ]; then
       update_ui "Pruning all unused networks..." 20
-      docker network prune -f 2>&1 | log_output
+      _net_out=$(docker network prune -f 2>&1); _net_rc=$?
+      echo "$_net_out" | log_output
+      update_ui "Unused networks pruned." 100
+      _RM_RESULT="\e[1;32m\u2714 Pruned unused networks\e[0m"
     else
       update_ui "Removing network $RM_NAME..." 50
-      docker network rm $force_flag "$RM_NAME" 2>&1 | log_output
+      _net_out=$(docker network rm $force_flag "$RM_NAME" 2>&1); _net_rc=$?
+      echo "$_net_out" | log_output
+      if [ $_net_rc -eq 0 ]; then
+        _RM_RESULT="\e[1;32m\u2714 Removed network: $RM_NAME\e[0m"
+      elif echo "$_net_out" | grep -qi "not found"; then
+        _RM_RESULT="\e[1;33m\u26a0 Network not found: $RM_NAME\e[0m"
+      elif echo "$_net_out" | grep -qi "has active endpoints\|in use"; then
+        _RM_RESULT="\e[1;31m\u2718 Network in use \u2014 can't remove: $RM_NAME\e[0m"
+      else
+        _RM_RESULT="\e[1;31m\u2718 Could not remove: $RM_NAME\e[0m"
+      fi
+      update_ui "Network operation complete." 100
     fi
-    update_ui "Network(s) removed." 100
 
   # ── stacks rm image NAME ──
   elif [[ "${RM_SUB,,}" =~ ^(image|img|i)$ ]]; then
@@ -1733,6 +1789,11 @@ elif [ "$COMMAND" == "rm" ]; then
     echo -e "\e[1;31m✘ Unknown rm target: $RM_SUB\e[0m"
     echo -e "\e[1;33mUsage: stacks rm [stackname|volume|network|image|containers|all] [name] [force]\e[0m"
     exit 1
+  fi
+  # Print rm status word (shown without needing info)
+  if [ -n "$_RM_RESULT" ]; then
+    clear_ui 2>/dev/null || true
+    echo -e "  $_RM_RESULT"
   fi
   finish_action_sequence "rm"
 
@@ -1947,7 +2008,7 @@ elif [ "$COMMAND" == "network" ]; then
       if [ -n "$_nfilter" ] && [[ "$_sname" != *"$_nfilter"* ]]; then
         grep -q "container_name:.*$_nfilter" "$f" 2>/dev/null || continue
       fi
-      _nets=$(docker compose -f "$f" config 2>/dev/null | grep -E "^networks:" -A 999 | grep "name:" | awk '{print $2}')
+      _nets=$(docker compose -f "$f" config 2>/dev/null | awk '/^networks:/{f=1;next} /^[a-zA-Z]/{f=0} f && /^    name:/{print $2}')
       if [ -n "$_nets" ]; then
         echo -e "  \e[1;36m$_sname\e[0m"
         for n in $_nets; do echo -e "    \e[1;34m$n\e[0m"; done
@@ -2595,6 +2656,154 @@ elif [ "$COMMAND" == "backup" ]; then
   fi
   exit 0
 
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: SCALE (Sablier zero-scale toggle)
+# Usage:
+#   stacks scale on|off                    -- all stacks
+#   stacks scale net_2 on|off              -- one stack
+#   stacks scale net_2 wazuh.manager on|off -- one service
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "scale" ]; then
+  printf "\e[?25h"
+
+  # Check if Sablier is installed/running
+  _sablier_running=$(command docker inspect sablier --format "{{.State.Status}}" 2>/dev/null)
+  if [ -z "$_sablier_running" ]; then
+    echo -e "\e[1;33m⚠ Sablier not found — scale command disabled.\e[0m"
+    exit 0
+  fi
+
+  # Parse args: scale [stack] [service] on|off
+  _scale_arg1="${TARGET_ARGS[0]:-}"
+  _scale_arg2="${TARGET_ARGS[1]:-}"
+  _scale_arg3="${TARGET_ARGS[2]:-}"
+
+  # Determine mode, stack, service, state
+  if [[ "${_scale_arg1,,}" =~ ^(on|off)$ ]]; then
+    _scale_mode="all"; _scale_state="${_scale_arg1,,}"
+  elif [[ "${_scale_arg2,,}" =~ ^(on|off)$ ]]; then
+    _scale_mode="stack"; _scale_stack="$_scale_arg1"; _scale_state="${_scale_arg2,,}"
+  elif [[ "${_scale_arg3,,}" =~ ^(on|off)$ ]]; then
+    _scale_mode="service"; _scale_stack="$_scale_arg1"; _scale_svc="$_scale_arg2"; _scale_state="${_scale_arg3,,}"
+  else
+    echo -e "\e[1;33mUsage: stacks scale [stack] [service] on|off\e[0m"
+    exit 1
+  fi
+
+  _scale_val="true"; [ "$_scale_state" == "off" ] && _scale_val="false"
+  _scale_changed=0
+
+  _do_scale_file() {
+    local yml="$1" svc="$2" val="$3"
+    if [ ! -f "$yml" ]; then return; fi
+    python3 - "$yml" "$svc" "$val" << 'PYEOF'
+import sys, re
+
+path, svc, val = sys.argv[1], sys.argv[2], sys.argv[3]
+content = open(path).read()
+changed = 0
+
+if svc == "__all__":
+    # All services in file
+    def replace_enable(m):
+        global changed
+        changed += 1
+        return m.group(0).replace(
+            f"sablier.enable={"true" if val=="false" else "false"}",
+            f"sablier.enable={val}"
+        ) if f"sablier.enable=" in m.group(0) else m.group(0)
+    
+    # Replace all sablier.enable values
+    new = re.sub(r'sablier\.enable=(true|false)', f'sablier.enable={val}', content)
+    if new != content:
+        changed = content.count('sablier.enable=') 
+        content = new
+    
+    # Add sablier labels to services that don't have them
+    services_without = []
+    in_svc = False
+    lines = content.splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        out.append(line)
+        # Detect service block that has labels but no sablier.enable
+        if re.match(r'^  [a-zA-Z0-9_-]+:\s*$', line) and not line.strip().startswith('x-'):
+            # Look ahead for labels section without sablier
+            block_end = i+1
+            has_labels = False; has_sablier = False; label_line = None
+            for j in range(i+1, min(i+60, len(lines))):
+                if re.match(r'^  [a-zA-Z0-9_-]+:\s*$', lines[j]) and j > i+1:
+                    block_end = j; break
+                if 'labels:' in lines[j]: has_labels = True; label_line = j
+                if 'sablier.enable' in lines[j]: has_sablier = True
+            if has_labels and not has_sablier and label_line:
+                # Find the last label line and insert after it
+                insert_at = label_line + 1
+                while insert_at < block_end and (lines[insert_at].strip().startswith('-') or lines[insert_at].strip().startswith('"')):
+                    insert_at += 1
+                lines.insert(insert_at, f'      - "sablier.enable={val}"')
+                lines.insert(insert_at+1, f'      - "sablier.group=auto"')
+                changed += 1
+        i += 1
+    content = "\n".join(out)
+else:
+    # Single service
+    idx = content.find(f'container_name: {svc}')
+    if idx < 0:
+        print(f"Service {svc} not found"); sys.exit(0)
+    block_end = content.find('\n  #', idx)
+    if block_end < 0: block_end = len(content)
+    block = content[idx:block_end]
+    if 'sablier.enable' in block:
+        new_block = re.sub(r'sablier\.enable=(true|false)', f'sablier.enable={val}', block)
+        content = content[:idx] + new_block + content[block_end:]
+        changed = 1
+    else:
+        # Add sablier labels
+        label_idx = block.find('labels:')
+        if label_idx >= 0:
+            insert = block.find('\n', label_idx + len('labels:'))
+            new_block = block[:insert] + f'\n      - "sablier.enable={val}"\n      - "sablier.group=auto"' + block[insert:]
+            content = content[:idx] + new_block + content[block_end:]
+            changed = 1
+
+if changed:
+    open(path,'w').write(content)
+    print(f"✔ {changed} change(s) in {path.split('/')[-1]}")
+else:
+    print(f"· No changes needed in {path.split('/')[-1]}")
+PYEOF
+  }
+
+  case "$_scale_mode" in
+    all)
+      echo -e "\e[1;36m⚡ Sablier scale ${_scale_state^^} — ALL stacks\e[0m"
+      for _sf in "$STACKS_DIR"/*.yml; do
+        _do_scale_file "$_sf" "__all__" "$_scale_val"
+        _scale_changed=$((_scale_changed+1))
+      done
+      ;;
+    stack)
+      if [ ! -f "$STACKS_DIR/$_scale_stack.yml" ]; then
+        echo -e "\e[1;31m✘ Stack not found: $_scale_stack\e[0m"; exit 1
+      fi
+      echo -e "\e[1;36m⚡ Sablier scale ${_scale_state^^} — stack: $_scale_stack\e[0m"
+      _do_scale_file "$STACKS_DIR/$_scale_stack.yml" "__all__" "$_scale_val"
+      ;;
+    service)
+      if [ ! -f "$STACKS_DIR/$_scale_stack.yml" ]; then
+        echo -e "\e[1;31m✘ Stack not found: $_scale_stack\e[0m"; exit 1
+      fi
+      echo -e "\e[1;36m⚡ Sablier scale ${_scale_state^^} — $_scale_stack/$_scale_svc\e[0m"
+      _do_scale_file "$STACKS_DIR/$_scale_stack.yml" "$_scale_svc" "$_scale_val"
+      ;;
+  esac
+
+  echo -e "\n\e[1;32m✔ Scale ${_scale_state^^} applied. Run 'stacks up <stack> recreate' to apply changes.\e[0m"
+  exit 0
 
 # ---------------------------------------------------------
 # COMMAND BRANCH: DESCRIBE

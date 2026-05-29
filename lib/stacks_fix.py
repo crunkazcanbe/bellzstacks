@@ -1,24 +1,88 @@
 #!/usr/bin/env python3
 """
 stacks_fix.py — Automated compose file fixer for StacksServer
+
 Fixes:
-  1. Missing Docker networks (creates them)
-  2. Missing Docker volumes (creates them)  
-  3. Auto-injects smart healthchecks based on image type
+  1. Auto-defines missing networks/volumes into the smallest "creator" file
+     (any compose file that defines named networks/volumes is a creator;
+      not hard-coded to core_*). Names are taken VERBATIM from the service
+      files — never spell-corrected. Networks get the full bridge template
+      with a fresh, non-colliding 10.50.x subnet. Volumes get {external: true}.
+      New defines are also synced into that file's provisioner_* service so
+      they actually get created.
+  2. Heals obvious typos in creator files (external: tfue -> true, etc.).
+  3. Auto-injects smart healthchecks ONLY into services that have none.
+     Existing healthchecks are NEVER touched. Deep-inspects the running
+     container first, then falls back to the image-pattern table, then
+     port-based, then a safe generic.
+
 Usage:
   stacks_fix.py all
   stacks_fix.py <stackname>
   stacks_fix.py <stackname> <servicename>
+  stacks_fix.py all --dry-run        # show what would change, write nothing
+
+Config (optional): ~/.config/stacks/stacks.conf
+  FIX_HEALTHCHECKS=1        # 0 disables all healthcheck injection
+  FIX_DEFINE_NETVOL=1       # 0 disables network/volume auto-define
+  FIX_HEAL_TYPOS=1          # 0 disables creator-file typo healing
+  FIX_DEEP_INSPECT=1        # 0 skips docker inspect, uses pattern table only
+  FIX_SUBNET_BASE=10.50     # the /16 prefix used for generated subnets
+  FIX_HC_SKIP="svc1 svc2"   # space-separated service names to never add HC to
 """
-import sys, os, re, subprocess
+import sys, os, re, subprocess, json, shutil, time
 
 STACKS_DIR = "/srv/stacks/Stacks"
+CONF_PATH  = "~/.config/stacks/stacks.conf"
+BACKUP_DIR = "/srv/stacks/backups"
+
+def _backup(p):
+    try:
+        import os, shutil, time
+        cfg = load_conf()
+        if not on(cfg.get("FIX_BACKUP", "1")):
+            return
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        shutil.copy2(p, os.path.join(BACKUP_DIR, os.path.basename(p) + f".bak-{int(time.time())}"))
+    except Exception:
+        pass
+
 
 G="\033[1;32m"; Y="\033[1;33m"; R="\033[1;31m"; C="\033[1;36m"; M="\033[1;35m"; X="\033[0m"
 
 def pr(msg): print(msg, flush=True)
 
-# ── Healthcheck templates ──────────────────────────────────────────────────────
+# ── Config loader ────────────────────────────────────────────────────────────
+def load_conf():
+    cfg = {
+        "FIX_HEALTHCHECKS": "1",
+        "FIX_DEFINE_NETVOL": "1",
+        "FIX_HEAL_TYPOS": "1",
+        "FIX_DEEP_INSPECT": "1",
+        "FIX_SUBNET_BASE": "10.50",
+        "FIX_BACKUP": "1",
+        "FIX_SKIP_FILES": "net_0-ext.yml",
+        "FIX_HC_SKIP": "",
+        "STACKS_DIR": STACKS_DIR,
+    }
+    if os.path.isfile(CONF_PATH):
+        try:
+            for line in open(CONF_PATH):
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k in cfg:
+                    cfg[k] = v
+        except Exception as e:
+            pr(f"{Y}⚠ Could not fully read config ({e}); using defaults.{X}")
+    return cfg
+
+def on(v): return str(v).strip() not in ("0", "", "false", "False", "no")
+
+# ── Healthcheck templates (image-name based) ───────────────────────────────────
 HEALTHCHECKS = [
     (r'postgres|pgvecto|timescale',
      ['CMD-SHELL', 'pg_isready -U postgres || exit 1'],
@@ -154,34 +218,95 @@ HEALTHCHECKS = [
      '10s','5s',10,'30s'),
 ]
 
-def get_healthcheck(image, ports):
+PORT_MAP = {
+    '80':'http://localhost:80/',     '81':'http://localhost:81/',
+    '3000':'http://localhost:3000/', '3001':'http://localhost:3001/',
+    '4000':'http://localhost:4000/', '5000':'http://localhost:5000/',
+    '7860':'http://localhost:7860/', '8000':'http://localhost:8000/',
+    '8080':'http://localhost:8080/', '8096':'http://localhost:8096/',
+    '9000':'http://localhost:9000/', '9090':'http://localhost:9090/',
+}
+
+def hc_from_pattern(image, ports):
     img = image.lower().split(':')[0]
     for pattern, cmd, interval, timeout, retries, start in HEALTHCHECKS:
         if re.search(pattern, img, re.I):
-            return cmd, interval, timeout, retries, start
-    # Port-based fallback
-    port_map = {
-        '80':'http://localhost:80/',
-        '3000':'http://localhost:3000/',
-        '8080':'http://localhost:8080/',
-        '8000':'http://localhost:8000/',
-        '9000':'http://localhost:9000/',
-        '5000':'http://localhost:5000/',
-        '4000':'http://localhost:4000/',
-        '7860':'http://localhost:7860/',
-        '3001':'http://localhost:3001/',
-    }
+            return cmd, interval, timeout, retries, start, f"pattern:{pattern}"
     for p in ports:
-        m = re.search(r':(\d+):\d+', p)
-        if m and m.group(1) in port_map:
-            url = port_map[m.group(1)]
+        m = re.search(r':(\d+):\d+', p) or re.search(r'^(\d+):\d+', p)
+        if m and m.group(1) in PORT_MAP:
+            url = PORT_MAP[m.group(1)]
             return (['CMD-SHELL', f'wget -qO- {url} || exit 1'],
-                    '30s','10s',5,'60s')
+                    '30s','10s',5,'60s', f"port:{m.group(1)}")
     return (['CMD-SHELL', 'wget -qO- http://localhost:8080/ || exit 1'],
-            '30s','10s',5,'60s')
+            '30s','10s',5,'60s', "generic")
+
+def hc_from_inspect(container):
+    """
+    Deep-inspect a RUNNING container. Returns a healthcheck tuple or None.
+    Priority: image's own baked-in Healthcheck.Test, else first exposed port.
+    Only trusted when the container is actually running.
+    """
+    try:
+        out = subprocess.run(['docker','inspect',container],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode != 0 or not out.stdout.strip():
+            return None
+        data = json.loads(out.stdout)
+        if not data:
+            return None
+        c = data[0]
+        state = c.get('State', {})
+        if state.get('Status') != 'running':
+            return None  # nothing live to trust
+
+        # 1) Image already declares a healthcheck — reuse its test verbatim
+        hc = (c.get('Config', {}) or {}).get('Healthcheck') or {}
+        test = hc.get('Test') or []
+        if test and test != ['NONE']:
+            interval = _ns_to_s(hc.get('Interval')) or '15s'
+            timeout  = _ns_to_s(hc.get('Timeout'))  or '5s'
+            retries  = hc.get('Retries') or 5
+            start    = _ns_to_s(hc.get('StartPeriod')) or '30s'
+            return (list(test), interval, timeout, int(retries), start,
+                    "inspect:image-healthcheck")
+
+        # 2) Probe the first sensible exposed TCP port
+        exposed = (c.get('Config', {}) or {}).get('ExposedPorts') or {}
+        cand = []
+        for k in exposed:
+            mm = re.match(r'(\d+)/tcp', k)
+            if mm:
+                cand.append(int(mm.group(1)))
+        for port in sorted(cand):
+            return (['CMD-SHELL', f'wget -qO- http://localhost:{port}/ '
+                                  f'|| curl -sf http://localhost:{port}/ || exit 1'],
+                    '15s','5s',5,'45s', f"inspect:port-{port}")
+    except Exception:
+        return None
+    return None
+
+def _ns_to_s(ns):
+    """Docker inspect returns durations in nanoseconds; convert to '12s'."""
+    try:
+        if not ns:
+            return None
+        secs = int(ns) // 1_000_000_000
+        if secs <= 0:
+            return None
+        return f"{secs}s"
+    except Exception:
+        return None
+
+def choose_healthcheck(svc, deep_inspect):
+    """Deep-inspect running container first, then pattern/port/generic."""
+    if deep_inspect and svc['name']:
+        res = hc_from_inspect(svc['name'])
+        if res:
+            return res
+    return hc_from_pattern(svc['image'], svc['ports'])
 
 def format_healthcheck(cmd, interval, timeout, retries, start):
-    """Format healthcheck as proper YAML lines with 4-space indent"""
     lines = ['    healthcheck:']
     lines.append('      test:')
     for item in cmd:
@@ -192,28 +317,26 @@ def format_healthcheck(cmd, interval, timeout, retries, start):
     lines.append(f'      start_period: {start}')
     return '\n'.join(lines) + '\n'
 
-# ── Parse services properly ────────────────────────────────────────────────────
+# ── Robust service parser ──────────────────────────────────────────────────────
 def parse_services_with_positions(path):
     """
-    Returns list of dicts with:
-      name, image, ports, has_healthcheck, 
-      block_start (line index of '  name:'), 
-      block_end (line index of last line before next service or EOF)
+    Bulletproof healthcheck detection so we NEVER double-inject into a service
+    that already has one (the bug that wiped Wazuh/dokploy/Coolify checks).
+    Detects healthcheck in block form, flow form {...}, disabled form, and
+    commented form within the service's own indentation block.
     """
     lines = open(path).readlines()
     services = []
     in_services = False
     current = None
-    
+
     for i, line in enumerate(lines):
         stripped = line.rstrip()
-        
-        # Detect services: section
+
         if re.match(r'^services:\s*$', stripped):
             in_services = True
             continue
-        
-        # Detect end of services section
+
         if in_services and re.match(r'^[a-zA-Z]', stripped) and not stripped.startswith(' '):
             if current:
                 current['block_end'] = i - 1
@@ -221,12 +344,10 @@ def parse_services_with_positions(path):
                 current = None
             in_services = False
             continue
-        
+
         if not in_services:
             continue
-        
-        # Detect service definition — MUST be exactly 2-space indent
-        # and NOT start with x- (anchors) and NOT be a comment
+
         m = re.match(r'^  ([a-zA-Z0-9][a-zA-Z0-9_.\-]*):\s*$', stripped)
         if m and not m.group(1).startswith('x-'):
             if current:
@@ -241,166 +362,514 @@ def parse_services_with_positions(path):
                 'block_end': len(lines) - 1,
             }
             continue
-        
+
         if current:
-            # image:
             im = re.match(r'^\s+image:\s+(.+)', stripped)
-            if im: current['image'] = im.group(1).strip()
-            # ports
+            if im:
+                current['image'] = im.group(1).strip()
             pm = re.match(r'^\s+-\s+"?(\S+:\d+:\d+)', stripped)
-            if pm: current['ports'].append(pm.group(1))
-            # healthcheck
-            if re.match(r'^\s+healthcheck:\s*$', stripped):
+            if pm:
+                current['ports'].append(pm.group(1))
+            # Healthcheck detection — any of these counts as "already present":
+            #   healthcheck:            (block)
+            #   healthcheck: {...}      (flow / inline)
+            #   healthcheck: disable    (rare)
+            #   # healthcheck: ...      (commented — leave the service alone)
+            #   <<: *something-with-healthcheck  (anchor merge; treat as present)
+            low = stripped.strip()
+            if re.match(r'^#?\s*healthcheck\s*:', low):
                 current['has_healthcheck'] = True
-    
+            if 'healthcheck' in low and re.search(r'\*[\w\-]*health', low):
+                current['has_healthcheck'] = True
+
     if current:
         services.append(current)
-    
+
     return services, lines
 
-# ── Inject healthcheck into a service block ────────────────────────────────────
-def inject_hc_into_service(lines, svc):
-    """
-    Find the right place inside svc's block to inject healthcheck.
-    Insert it before blkio_config / ulimits / deploy / logging / labels
-    or at end of block if none found.
-    Skips if healthcheck already exists.
-    """
-    if svc['has_healthcheck']:
-        return lines
-    
-    hc_cmd, interval, timeout, retries, start = get_healthcheck(
-        svc['image'], svc['ports'])
+def inject_hc_into_service(lines, svc, deep_inspect):
+    """Insert a healthcheck. Caller guarantees svc has none. Returns (lines, note)."""
+    hc_cmd, interval, timeout, retries, start, source = choose_healthcheck(svc, deep_inspect)
     hc_text = format_healthcheck(hc_cmd, interval, timeout, retries, start)
-    
-    # Find insertion point within this service's block
-    # Insert before blkio_config, ulimits, deploy, logging, or storage_opt
-    # or just before the block_end
+
     insert_after = None
-    
     for i in range(svc['block_start'], svc['block_end'] + 1):
         l = lines[i].rstrip()
-        # These are typically the last fields — insert healthcheck before them
-        if re.match(r'^\s+(blkio_config|ulimits|deploy|storage_opt):', l):
+        if re.match(r'^\s+(blkio_config|ulimits|deploy|storage_opt|logging):', l):
             insert_after = i
             break
-    
     if insert_after is None:
-        # Insert at end of block
-        insert_after = svc['block_end'] + 1
-    
+        # No anchor — insert right AFTER the image: line so it lands inside
+        # the service block, never past the end of the file.
+        for i in range(svc['block_start'], svc['block_end'] + 1):
+            if re.match(r'^\s+image:', lines[i]):
+                insert_after = i + 1
+                break
+    if insert_after is None:
+        # Last resort: right after the service's own header line
+        insert_after = svc['block_start'] + 1
+
     new_lines = lines[:insert_after] + [hc_text] + lines[insert_after:]
-    return new_lines
+    return new_lines, source
 
-# ── Network/volume helpers ─────────────────────────────────────────────────────
-def get_declared_networks(path):
-    content = open(path).read()
-    in_nets = False; nets = []
+# ── Creator-file discovery (NOT hard-coded to core_*) ──────────────────────────
+def top_level_block_names(content, block):
+    """Return names defined under a top-level `networks:` or `volumes:` block."""
+    names = []
+    in_block = False
     for line in content.splitlines():
-        if re.match(r'^networks:', line): in_nets = True; continue
-        if re.match(r'^[a-zA-Z]', line) and not line.startswith(' '): in_nets = False
-        if not in_nets: continue
-        m = re.match(r'^  ([a-zA-Z0-9_.\-]+):', line)
-        if m: nets.append(m.group(1))
-    return nets
+        if re.match(rf'^{block}:\s*$', line):
+            in_block = True
+            continue
+        if in_block and re.match(r'^[a-zA-Z]', line) and not line.startswith(' '):
+            in_block = False
+        if not in_block:
+            continue
+        m = re.match(r'^  ([a-zA-Z0-9][a-zA-Z0-9_.\-]*):', line)
+        if m:
+            names.append(m.group(1))
+    return names
 
-def get_declared_volumes(path):
+def real_defined_nets(stacks_dir, skip_files=None):
+    """Networks defined WITH a subnet/ipam (true creators) across ALL files."""
+    defined = set()
+    skip_files = skip_files or set()
+    for f in sorted(os.listdir(stacks_dir)):
+        if not f.endswith(('.yml','.yaml')): continue
+        if f in skip_files: continue
+        try: content = open(os.path.join(stacks_dir,f)).read()
+        except Exception: continue
+        in_block = False
+        for line in content.splitlines():
+            if re.match(r'^networks:\s*$', line): in_block=True; continue
+            if in_block and re.match(r'^[a-zA-Z]', line) and not line.startswith(' '): in_block=False
+            if not in_block: continue
+            m = re.match(r'^  ([a-zA-Z0-9][a-zA-Z0-9_.\-]*):(.*)$', line)
+            if m and ('subnet' in m.group(2) or 'ipam' in m.group(2)):
+                defined.add(m.group(1))
+    return defined
+
+def real_defined_vols(stacks_dir, skip_files=None):
+    """Volumes defined anywhere as a top-level entry."""
+    defined = set()
+    skip_files = skip_files or set()
+    for f in sorted(os.listdir(stacks_dir)):
+        if not f.endswith(('.yml','.yaml')): continue
+        if f in skip_files: continue
+        try: content = open(os.path.join(stacks_dir,f)).read()
+        except Exception: continue
+        in_block = False
+        for line in content.splitlines():
+            if re.match(r'^volumes:\s*$', line): in_block=True; continue
+            if in_block and re.match(r'^[a-zA-Z]', line) and not line.startswith(' '): in_block=False
+            if not in_block: continue
+            m = re.match(r'^  ([a-zA-Z0-9][a-zA-Z0-9_.\-]*):', line)
+            if m: defined.add(m.group(1))
+    return defined
+
+def discover_creator_files(stacks_dir, skip_files=None):
+    """
+    A "creator file" is any compose file that defines named entries under a
+    top-level networks: or volumes: block. Returns dict:
+       path -> {"nets": set(...), "vols": set(...), "size": bytes}
+    Independent of filename, so it works on any setup.
+    """
+    creators = {}
+    skip_files = skip_files or set()
+    for f in sorted(os.listdir(stacks_dir)):
+        if not (f.endswith('.yml') or f.endswith('.yaml')):
+            continue
+        if f in skip_files:
+            continue
+        path = os.path.join(stacks_dir, f)
+        try:
+            content = open(path).read()
+        except Exception:
+            continue
+        nets = set(top_level_block_names(content, 'networks'))
+        vols = set(top_level_block_names(content, 'volumes'))
+        if nets or vols:
+            creators[path] = {"nets": nets, "vols": vols,
+                              "size": os.path.getsize(path)}
+    return creators
+
+def smallest_file_overall(stacks_dir):
+    best = None; best_size = float('inf')
+    for f in sorted(os.listdir(stacks_dir)):
+        if not (f.endswith('.yml') or f.endswith('.yaml')):
+            continue
+        path = os.path.join(stacks_dir, f)
+        sz = os.path.getsize(path)
+        if sz < best_size:
+            best_size = sz; best = path
+    return best
+
+def all_used_subnets(creators, subnet_base):
+    """Scan every creator file for used 3rd octets in <base>.<N>.0/24."""
+    used = set()
+    esc = re.escape(subnet_base)
+    pat = re.compile(rf'{esc}\.(\d{{1,3}})\.0/24')
+    for path in creators:
+        try:
+            for m in pat.finditer(open(path).read()):
+                used.add(int(m.group(1)))
+        except Exception:
+            pass
+    return used
+
+def next_subnet_octet(used):
+    """Gap-fill from 1..254; if full, climb above the highest."""
+    for n in range(1, 255):
+        if n not in used:
+            return n
+    return (max(used) + 1) if used else 1
+
+# ── Service reference collection ───────────────────────────────────────────────
+def collect_service_refs(stacks_dir, creators, skip_files=None):
+    """
+    Walk every NON-creator service file and gather the network & volume names
+    that services actually reference. Names taken verbatim. Returns
+    (needed_nets:set, needed_vols:set).
+    """
+    needed_nets = set()
+    needed_vols = set()
+    creator_paths = set(creators.keys())
+    skip_files = skip_files or set()
+
+    for f in sorted(os.listdir(stacks_dir)):
+        if not (f.endswith('.yml') or f.endswith('.yaml')):
+            continue
+        if f in skip_files:
+            continue
+        path = os.path.join(stacks_dir, f)
+        if path in creator_paths:
+            # creators define; we read their service refs too, but skip their
+            # own top-level defs (handled separately)
+            pass
+        try:
+            content = open(path).read()
+        except Exception:
+            continue
+
+        # Networks referenced by services: under a service-level `networks:`
+        # either list form (- foo_net) or mapping form (foo_net:)
+        for m in re.finditer(r'^\s{4,6}-\s+"?([a-zA-Z0-9][a-zA-Z0-9_.\-]*_net)"?\s*$',
+                             content, re.M):
+            needed_nets.add(m.group(1))
+        for m in re.finditer(r'^\s{6}([a-zA-Z0-9][a-zA-Z0-9_.\-]*_net):\s*$',
+                             content, re.M):
+            needed_nets.add(m.group(1))
+
+        # Volumes referenced by services: "- name:/path" where name is a
+        # NAMED volume (no leading slash, not a bind mount, no ./ or ~).
+        # Anchored at end + URL-scheme guard so healthcheck commands like
+        # - "wget -qO- http://localhost:8080/ || exit 1" are NOT misread.
+        for m in re.finditer(r'^\s{4,8}-\s+"?([a-zA-Z0-9][a-zA-Z0-9_.\-]*):(/[^"\s]+)"?\s*$',
+                             content, re.M):
+            vol = m.group(1)
+            path_part = m.group(2)
+            if vol.startswith(('.', '/', '~')):
+                continue
+            if vol in ('http', 'https', 'ftp', 'ws', 'wss', 'tcp', 'udp'):
+                continue
+            if '//' in path_part:
+                continue
+            needed_vols.add(vol)
+
+    return needed_nets, needed_vols
+
+# ── Network/volume definition templates ────────────────────────────────────────
+def net_definition(name, octet, subnet_base):
+    base = name[:-4] if name.endswith('_net') else name
+    return (
+        f"  {name}: {{name: {name}, driver: bridge, attachable: true, "
+        f"external: false, internal: false, enable_ipv6: false, "
+        f"labels: [\"com.stacks.network={base}\", "
+        f"\"com.stacks.env=production\"], "
+        f"ipam: {{driver: default, config: [{{subnet: {subnet_base}.{octet}.0/24, "
+        f"gateway: {subnet_base}.{octet}.1}}]}}}}\n"
+    )
+
+def vol_definition(name):
+    return f"  {name}: {{name: {name}, external: true}}\n"
+
+def find_provisioner_block(lines):
+    """Return (start_idx, end_idx) of the first provisioner_* service block, or None."""
+    in_services = False
+    for i, line in enumerate(lines):
+        if re.match(r'^services:\s*$', line.rstrip()):
+            in_services = True
+            continue
+        if in_services:
+            m = re.match(r'^  (provisioner[a-zA-Z0-9_.\-]*):\s*$', line.rstrip())
+            if m:
+                # find block end
+                for j in range(i+1, len(lines)):
+                    if re.match(r'^  [a-zA-Z0-9]', lines[j]) or \
+                       (re.match(r'^[a-zA-Z]', lines[j]) and not lines[j].startswith(' ')):
+                        return (i, j)
+                return (i, len(lines))
+    return None
+
+def add_to_creator(path, new_nets, new_vols, subnet_base, used_subnets, dry_run):
+    """
+    Append network/volume definitions to a creator file's top-level blocks,
+    and sync them into that file's provisioner_* service lists.
+    Inserts only — never deletes existing lines.
+    """
     content = open(path).read()
-    in_vols = False; vols = []
-    for line in content.splitlines():
-        if re.match(r'^volumes:', line): in_vols = True; continue
-        if re.match(r'^[a-zA-Z]', line) and not line.startswith(' '): in_vols = False
-        if not in_vols: continue
-        m = re.match(r'^  ([a-zA-Z0-9_.\-]+):', line)
-        if m: vols.append(m.group(1))
-    return vols
+    lines = content.split('\n')
+    notes = []
 
-def net_exists(name):
-    return subprocess.run(['docker','network','inspect',name],
-                         capture_output=True).returncode == 0
+    existing_nets = set(top_level_block_names(content, 'networks'))
+    existing_vols = set(top_level_block_names(content, 'volumes'))
 
-def vol_exists(name):
-    return subprocess.run(['docker','volume','inspect',name],
-                         capture_output=True).returncode == 0
+    # ---- Networks ----
+    def insert_after_block_header(lines, header, payload_lines):
+        for i, l in enumerate(lines):
+            if re.match(rf'^{header}:\s*$', l.rstrip()):
+                return lines[:i+1] + payload_lines + lines[i+1:]
+        return None
 
-# ── Fix a single stack ─────────────────────────────────────────────────────────
-def fix_stack(path, target_svc=None):
-    stack_name = os.path.basename(path).replace('.yml','')
-    pr(f"\n{C}🔧 Fixing: {stack_name}{X}")
-    changes = 0
-    
-    # ── 1. Networks — warn only, never create (core stacks define them)
-    for net in get_declared_networks(path):
-        if not net_exists(net):
-            pr(f"  {R}⚠ Missing network: {net} — add to a core stack to create it{X}")
-    
-    # ── 2. Volumes ─────────────────────────────────────────────────────────
-    for vol in get_declared_volumes(path):
-        if not vol_exists(vol):
-            pr(f"  {Y}⚡ Creating volume: {vol}{X}")
-            r = subprocess.run(['docker','volume','create',vol],
-                             capture_output=True, text=True)
-            if r.returncode == 0:
-                pr(f"  {G}✔ Volume created: {vol}{X}"); changes += 1
+    for net in sorted(new_nets):
+        if net in existing_nets:
+            continue
+        octet = next_subnet_octet(used_subnets)
+        used_subnets.add(octet)
+        payload = [net_definition(net, octet, subnet_base).rstrip('\n')]
+        res = insert_after_block_header(lines, 'networks', payload)
+        if res is None:
+            # No top-level networks: block — create one before `services:`
+            for i, l in enumerate(lines):
+                if re.match(r'^services:\s*$', l.rstrip()):
+                    lines = lines[:i] + ['networks:'] + payload + [''] + lines[i:]
+                    break
             else:
-                pr(f"  {R}✘ Failed: {r.stderr.strip()[:60]}{X}")
-    
-    # ── 3. Healthchecks ────────────────────────────────────────────────────
+                lines = ['networks:'] + payload + [''] + lines
+        else:
+            lines = res
+        existing_nets.add(net)
+        notes.append(f"net {net} -> {subnet_base}.{octet}.0/24")
+
+    # ---- Volumes ----
+    for vol in sorted(new_vols):
+        if vol in existing_vols:
+            continue
+        payload = [vol_definition(vol).rstrip('\n')]
+        res = insert_after_block_header(lines, 'volumes', payload)
+        if res is None:
+            for i, l in enumerate(lines):
+                if re.match(r'^services:\s*$', l.rstrip()):
+                    lines = lines[:i] + ['volumes:'] + payload + [''] + lines[i:]
+                    break
+            else:
+                lines = ['volumes:'] + payload + [''] + lines
+        else:
+            lines = res
+        existing_vols.add(vol)
+        notes.append(f"vol {vol}")
+
+    # ---- Provisioner sync ----
+    prov = find_provisioner_block(lines)
+    if prov and (new_nets or new_vols):
+        pstart, pend = prov
+        block = lines[pstart:pend]
+        # networks: list inside provisioner
+        def ensure_in_list(block, key, items, quote=True):
+            # find "    key:" line inside block
+            for bi, bl in enumerate(block):
+                if re.match(rf'^    {key}:\s*$', bl.rstrip()):
+                    # gather existing entries
+                    existing = set()
+                    insert_at = bi + 1
+                    for k in range(bi+1, len(block)):
+                        mm = re.match(r'^      -\s+"?([^"\s]+)"?', block[k])
+                        if mm:
+                            existing.add(mm.group(1).split(':')[0])
+                            insert_at = k + 1
+                        elif re.match(r'^    [a-zA-Z]', block[k]):
+                            break
+                    adds = []
+                    for it in sorted(items):
+                        nm = it if not quote else it
+                        if nm not in existing:
+                            if key == 'volumes':
+                                adds.append(f'      - "{it}:/provision/{it}"')
+                            else:
+                                adds.append(f'      - "{it}"')
+                    if adds:
+                        block = block[:insert_at] + adds + block[insert_at:]
+                    return block
+            return block
+        block = ensure_in_list(block, 'networks', new_nets)
+        block = ensure_in_list(block, 'volumes', new_vols)
+        lines = lines[:pstart] + block + lines[pend:]
+
+    new_content = '\n'.join(lines)
+    if new_content != content and notes:
+        if dry_run:
+            pr(f"  {Y}[dry-run] would add to {os.path.basename(path)}: "
+               f"{'; '.join(notes)}{X}")
+        else:
+            _backup(path)
+            open(path, 'w').write(new_content)
+            pr(f"  {G}✔ {os.path.basename(path)}: added {'; '.join(notes)}{X}")
+        return len(notes)
+    return 0
+
+# ── Typo healing in creator files (safe set only) ──────────────────────────────
+def heal_creator_typos(path, dry_run):
+    """Fix known safe typos in creator files. Names are never touched."""
+    content = open(path).read()
+    original = content
+    fixes = []
+
+    # external: <typo-of-true/false>  -> nearest of true/false (edit dist <=2)
+    def near(word, target):
+        # tiny Levenshtein
+        a, b = word, target
+        if abs(len(a)-len(b)) > 2:
+            return 99
+        prev = list(range(len(b)+1))
+        for i, ca in enumerate(a, 1):
+            cur = [i]
+            for j, cb in enumerate(b, 1):
+                cur.append(min(prev[j]+1, cur[-1]+1,
+                               prev[j-1] + (ca != cb)))
+            prev = cur
+        return prev[-1]
+
+    def fix_external(m):
+        val = m.group(1)
+        if val in ('true', 'false'):
+            return m.group(0)
+        cand = min(('true', 'false'), key=lambda t: near(val, t))
+        if near(val, cand) <= 2:
+            fixes.append(f"external: {val} -> {cand}")
+            return m.group(0).replace(val, cand)
+        return m.group(0)
+
+    content = re.sub(r'external:\s*([A-Za-z]+)', fix_external, content)
+
+    if content != original and fixes:
+        if dry_run:
+            pr(f"  {Y}[dry-run] would heal {os.path.basename(path)}: "
+               f"{'; '.join(fixes)}{X}")
+        else:
+            _backup(path)
+            open(path, 'w').write(content)
+            pr(f"  {G}✔ healed {os.path.basename(path)}: {'; '.join(fixes)}{X}")
+        return len(fixes)
+    return 0
+
+# ── Healthcheck pass on one file ───────────────────────────────────────────────
+def fix_healthchecks(path, cfg, target_svc, dry_run):
+    deep = on(cfg["FIX_DEEP_INSPECT"])
+    skip = set(cfg["FIX_HC_SKIP"].split())
     services, lines = parse_services_with_positions(path)
-    
     if target_svc:
         services = [s for s in services if s['name'] == target_svc]
-    
-    # Process in REVERSE order so line numbers stay valid
-    for svc in reversed(services):
+
+    changes = 0
+    for svc in reversed(services):  # reverse keeps line numbers valid
         if not svc['image']:
-            pr(f"  {C}  {svc['name']}: no image, skipping{X}")
+            continue
+        # Never healthcheck idle holders (provisioners, bare alpine sleepers)
+        if svc['name'].startswith('provisioner') or re.match(r'^alpine(:|$)', svc['image'].strip()):
+            pr(f"  {C}  {svc['name']}: idle holder, skipping{X}")
+            continue
+        if svc['name'] in skip:
+            pr(f"  {C}  {svc['name']}: in skip-list, leaving alone{X}")
             continue
         if svc['has_healthcheck']:
-            pr(f"  {C}  {svc['name']}: already has healthcheck{X}")
+            pr(f"  {C}  {svc['name']}: already has healthcheck — NOT touched{X}")
             continue
-        
-        img_short = svc['image'].split('/')[-1].split(':')[0]
-        pr(f"  {Y}💉 {svc['name']} ({img_short}){X}")
-        lines = inject_hc_into_service(lines, svc)
+        if dry_run:
+            _, src = choose_healthcheck(svc, deep), None
+            pr(f"  {Y}[dry-run] would add healthcheck to {svc['name']}{X}")
+            changes += 1
+            continue
+        lines, source = inject_hc_into_service(lines, svc, deep)
         changes += 1
-        pr(f"  {G}✔ Healthcheck added{X}")
-    
-    # Write back
-    if changes > 0:
+        pr(f"  {G}💉 {svc['name']}: healthcheck added ({source}){X}")
+
+    if changes > 0 and not dry_run:
+        _backup(path)
         open(path, 'w').writelines(lines)
-        pr(f"  {G}✔ {stack_name}: {changes} fix(es) applied{X}")
-    else:
-        pr(f"  {G}✔ {stack_name}: nothing to fix{X}")
-    
     return changes
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Main ────────────────────────────────────────────────────────────────────────
 def main():
-    args = sys.argv[1:]
+    args = [a for a in sys.argv[1:] if a != '--dry-run']
+    dry_run = '--dry-run' in sys.argv[1:]
+    cfg = load_conf()
+    sd = cfg["STACKS_DIR"]
+
     target = args[0] if args else 'all'
     svc    = args[1] if len(args) > 1 else None
-    
+
     pr(f"\n{M}╔══════════════════════════════════════╗{X}")
     pr(f"{M}║   🔧 STACKS STACK FIXER               ║{X}")
     pr(f"{M}╚══════════════════════════════════════╝{X}")
-    
-    if target in ('all','--all'):
-        files = sorted([os.path.join(STACKS_DIR,f)
-                       for f in os.listdir(STACKS_DIR) if f.endswith('.yml')])
-    else:
-        fname = target if target.endswith('.yml') else target+'.yml'
-        fpath = os.path.join(STACKS_DIR, fname)
-        if not os.path.isfile(fpath):
-            pr(f"{R}✘ Stack not found: {target}{X}"); sys.exit(1)
-        files = [fpath]
-    
+    if dry_run:
+        pr(f"{Y}   DRY RUN — no files will be written{X}")
+
+    if not os.path.isdir(sd):
+        pr(f"{R}✘ Stacks dir not found: {sd}{X}"); sys.exit(1)
+
     total = 0
-    for f in files:
-        if os.path.isfile(f):
-            total += fix_stack(f, svc)
-    
-    pr(f"\n{G}✨ Done — {total} total fix(es) applied{X}\n")
+
+    # ── Phase 1: auto-define missing networks/volumes (dynamic creators) ──
+    if on(cfg["FIX_DEFINE_NETVOL"]):
+        pr(f"\n{C}🌐 Network/Volume auto-define{X}")
+        _skip = set(cfg.get("FIX_SKIP_FILES", "").split())
+        creators = discover_creator_files(sd, _skip)
+        needed_nets, needed_vols = collect_service_refs(sd, creators, _skip)
+
+        defined_nets = real_defined_nets(sd, _skip)
+        defined_vols = real_defined_vols(sd, _skip)
+
+        missing_nets = needed_nets - defined_nets
+        missing_vols = needed_vols - defined_vols
+
+        if missing_nets or missing_vols:
+            # Pick smallest creator; if none exist, smallest file overall bootstraps
+            if creators:
+                target_path = min(creators, key=lambda p: creators[p]["size"])
+            else:
+                target_path = smallest_file_overall(sd)
+                pr(f"  {Y}No creator files found — bootstrapping into "
+                   f"{os.path.basename(target_path)}{X}")
+            used = all_used_subnets(creators, cfg["FIX_SUBNET_BASE"])
+            total += add_to_creator(target_path, missing_nets, missing_vols,
+                                    cfg["FIX_SUBNET_BASE"], used, dry_run)
+        else:
+            pr(f"  {G}✔ All referenced networks/volumes already defined{X}")
+
+    # ── Phase 2: heal typos in creator files ──
+    if on(cfg["FIX_HEAL_TYPOS"]):
+        pr(f"\n{C}🩹 Creator-file typo healing{X}")
+        for path in discover_creator_files(sd):
+            total += heal_creator_typos(path, dry_run)
+
+    # ── Phase 3: healthchecks ──
+    if on(cfg["FIX_HEALTHCHECKS"]):
+        pr(f"\n{C}❤️  Healthchecks (add-only; existing ones never touched){X}")
+        if target in ('all', '--all'):
+            files = sorted(os.path.join(sd, f) for f in os.listdir(sd)
+                           if f.endswith('.yml') or f.endswith('.yaml'))
+        else:
+            fname = target if target.endswith(('.yml', '.yaml')) else target + '.yml'
+            fpath = os.path.join(sd, fname)
+            if not os.path.isfile(fpath):
+                pr(f"{R}✘ Stack not found: {target}{X}"); sys.exit(1)
+            files = [fpath]
+        for f in files:
+            stack_name = os.path.basename(f).replace('.yml', '').replace('.yaml', '')
+            pr(f"\n{C}🔧 {stack_name}{X}")
+            total += fix_healthchecks(f, cfg, svc, dry_run)
+
+    pr(f"\n{G}✨ Done — {total} change(s){'(dry-run, none written)' if dry_run else ''}{X}\n")
 
 if __name__ == '__main__':
     main()
