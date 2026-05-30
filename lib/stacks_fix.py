@@ -61,6 +61,7 @@ def load_conf():
         "FIX_DEEP_INSPECT": "1",
         "FIX_SUBNET_BASE": "10.50",
         "FIX_BACKUP": "1",
+        "FIX_STRIP_PROFILES": "1",  # set to 0 to disable auto-stripping of profiles: blocks
         "FIX_SKIP_FILES": "net_0-ext.yml",
         "FIX_HC_SKIP": "",
         "STACKS_DIR": STACKS_DIR,
@@ -799,6 +800,35 @@ def fix_healthchecks(path, cfg, target_svc, dry_run):
     return changes
 
 # ── Main ────────────────────────────────────────────────────────────────────────
+def strip_profiles_from_file(filepath, dry_run=False):
+    """Remove profiles: blocks from a compose file. Returns True if changed."""
+    try:
+        content = open(filepath).read()
+    except:
+        return False
+    lines = content.split('\n')
+    result = []
+    skip_until_dedent = None
+    for line in lines:
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if stripped.startswith('profiles:'):
+            skip_until_dedent = indent
+            continue
+        if skip_until_dedent is not None:
+            if stripped == '' or indent > skip_until_dedent or stripped.startswith('-'):
+                continue
+            else:
+                skip_until_dedent = None
+        result.append(line)
+    new_content = '\n'.join(result)
+    if new_content != content:
+        if not dry_run:
+            _backup(filepath)
+            open(filepath, 'w').write(new_content)
+        return True
+    return False
+
 def main():
     args = [a for a in sys.argv[1:] if a != '--dry-run']
     dry_run = '--dry-run' in sys.argv[1:]
@@ -818,6 +848,31 @@ def main():
         pr(f"{R}✘ Stacks dir not found: {sd}{X}"); sys.exit(1)
 
     total = 0
+
+    # ── Phase 0: strip profiles: blocks (prevents services being skipped) ──
+    if on(cfg["FIX_STRIP_PROFILES"]):
+        pr(f"\n{C}🧹 Stripping profiles: blocks{X}")
+        _prof_fixed = 0
+        for f in sorted(os.listdir(sd)):
+            if not f.endswith(('.yml', '.yaml')):
+                continue
+            fp = os.path.join(sd, f)
+            if dry_run:
+                # Peek without writing
+                try:
+                    content = open(fp).read()
+                    if 'profiles:' in content:
+                        pr(f"  {Y}[dry-run] would strip profiles from {f}{X}")
+                        _prof_fixed += 1
+                except:
+                    pass
+            else:
+                if strip_profiles_from_file(fp, False):
+                    pr(f"  {G}✔ {f}: profiles: blocks stripped{X}")
+                    _prof_fixed += 1
+        if _prof_fixed == 0:
+            pr(f"  {G}✔ No profiles: blocks found{X}")
+        total += _prof_fixed
 
     # ── Phase 1: auto-define missing networks/volumes (dynamic creators) ──
     if on(cfg["FIX_DEFINE_NETVOL"]):
