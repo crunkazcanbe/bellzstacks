@@ -48,6 +48,7 @@ if [ -f "$CONFIG_FILE" ]; then
   source "$CONFIG_FILE"
 fi
 DO_RESTORE=0
+DO_BACKUP_PRE=0
 DO_DETACH=0
 DO_ATTACH=0
 DO_RESTART=0
@@ -74,6 +75,7 @@ for arg in "$@"; do
     fix) DO_FIX=1 ;;
     no-fix) DO_REPAIR=1; DO_FIX=0 ;;
     restore) DO_RESTORE=1 ;;
+    backup-pre) DO_BACKUP_PRE=1 ;;
     detach|d) DO_DETACH=1 ;;
     attach|a) DO_ATTACH=1 ;;
     info|i) DO_INFO=1 ;;
@@ -1253,45 +1255,6 @@ manage_stack() {
 }
 
 
-# ==============================================================================
-# ── RESTORE HANDLER ─────────────────────────────────────────────────────────
-if [ "$DO_RESTORE" -eq 1 ] && [ "$COMMAND" != "up" ] && [ "$COMMAND" != "down" ]; then
-  printf "\e[?25h"
-  echo -e "\n\e[1;35m📸 Restoring from golden snapshot...\e[0m"
-  if [ -n "$TARGET_STACK" ]; then
-    _snap="$SNAPSHOT_DIR/golden_latest/stacks/$TARGET_STACK.yml"
-    if [ -f "$_snap" ]; then
-      cp "$_snap" "$STACKS_DIR/$TARGET_STACK.yml"
-      echo -e "\e[1;32m✔ Restored: $TARGET_STACK\e[0m"
-    else
-      echo -e "\e[1;31m✘ No snapshot found for $TARGET_STACK\e[0m"
-    fi
-  else
-    restore_snapshot "$SNAPSHOT_DIR/golden_latest"
-    echo -e "\e[1;32m✔ Full restore complete\e[0m"
-  fi
-  exit 0
-fi
-
-if [ "$DO_RESTORE" -eq 1 ] && [ "$COMMAND" == "up" ]; then
-  echo -e "\n\e[1;35m📸 Restoring from snapshot before deploy...\e[0m"
-  if [ ${#PARSED_STACKS[@]} -gt 0 ]; then
-    for _rs in "${PARSED_STACKS[@]}"; do
-      _snap="$SNAPSHOT_DIR/golden_latest/stacks/$_rs.yml"
-      [ -f "$_snap" ] && cp "$_snap" "$STACKS_DIR/$_rs.yml" && echo -e "\e[1;32m✔ Restored: $_rs\e[0m"
-    done
-  elif [ -n "$TARGET_STACK" ]; then
-    _snap="$SNAPSHOT_DIR/golden_latest/stacks/$TARGET_STACK.yml"
-    [ -f "$_snap" ] && cp "$_snap" "$STACKS_DIR/$TARGET_STACK.yml" && echo -e "\e[1;32m✔ Restored: $TARGET_STACK\e[0m"
-  else
-    restore_snapshot "$SNAPSHOT_DIR/golden_latest"
-  fi
-fi
-
-# SNAPSHOT ENGINE
-# ==============================================================================
-SNAPSHOT_DIR="/srv/stacks/Snapshots"
-
 take_snapshot() {
   local label="${1:-golden}"
   local ts=$(date +%Y%m%d_%H%M%S)
@@ -1358,6 +1321,60 @@ list_snapshots() {
     echo "🌟 Golden latest → $(readlink $SNAPSHOT_DIR/golden_latest)"
   fi
 }
+
+# ==============================================================================
+# ── PRE-DEPLOY BACKUP HANDLER ────────────────────────────────────────────────
+if [ "$DO_BACKUP_PRE" -eq 1 ]; then
+  echo -e "\n\e[1;35m📸 Taking snapshot before deploy...\e[0m"
+  _snap_label="pre_deploy"
+  [ -n "$TARGET_STACK" ] && _snap_label="pre_${TARGET_STACK}"
+  take_snapshot "$_snap_label"
+  # If this is a standalone backup (not combined with up), exit here
+  if [ "$COMMAND" != "up" ] && [ "$COMMAND" != "down" ]; then
+    exit 0
+  fi
+fi
+
+# ==============================================================================
+# ── RESTORE HANDLER ─────────────────────────────────────────────────────────
+if [ "$DO_RESTORE" -eq 1 ] && [ "$COMMAND" != "up" ] && [ "$COMMAND" != "down" ]; then
+  printf "\e[?25h"
+  echo -e "\n\e[1;35m📸 Restoring from golden snapshot...\e[0m"
+  if [ -n "$TARGET_STACK" ]; then
+    _snap="$SNAPSHOT_DIR/golden_latest/stacks/$TARGET_STACK.yml"
+    if [ -f "$_snap" ]; then
+      cp "$_snap" "$STACKS_DIR/$TARGET_STACK.yml"
+      echo -e "\e[1;32m✔ Restored: $TARGET_STACK\e[0m"
+    else
+      echo -e "\e[1;31m✘ No snapshot found for $TARGET_STACK\e[0m"
+    fi
+  else
+    restore_snapshot "$SNAPSHOT_DIR/golden_latest"
+    echo -e "\e[1;32m✔ Full restore complete\e[0m"
+  fi
+  exit 0
+fi
+
+if [ "$DO_RESTORE" -eq 1 ] && [ "$COMMAND" == "up" ]; then
+  echo -e "\n\e[1;35m📸 Restoring from snapshot before deploy...\e[0m"
+  if [ ${#PARSED_STACKS[@]} -gt 0 ]; then
+    for _rs in "${PARSED_STACKS[@]}"; do
+      _snap="$SNAPSHOT_DIR/golden_latest/stacks/$_rs.yml"
+      [ -f "$_snap" ] && cp "$_snap" "$STACKS_DIR/$_rs.yml" && echo -e "\e[1;32m✔ Restored: $_rs\e[0m"
+    done
+  elif [ -n "$TARGET_STACK" ]; then
+    _snap="$SNAPSHOT_DIR/golden_latest/stacks/$TARGET_STACK.yml"
+    [ -f "$_snap" ] && cp "$_snap" "$STACKS_DIR/$TARGET_STACK.yml" && echo -e "\e[1;32m✔ Restored: $TARGET_STACK\e[0m"
+  else
+    restore_snapshot "$SNAPSHOT_DIR/golden_latest"
+  fi
+fi
+
+# SNAPSHOT ENGINE
+# ==============================================================================
+# SNAPSHOT_DIR is now set from stacks.conf or defaults below
+
+# Snapshot functions moved to top
 
 # ==============================================================================
 # MAIN EXECUTION DISPATCHER
