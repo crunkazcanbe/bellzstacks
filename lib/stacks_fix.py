@@ -106,7 +106,7 @@ HEALTHCHECKS = [
      ['CMD', 'redis-cli', 'ping'],
      '10s','3s',10,'10s'),
     (r'mongo(?!.*express|.*compass)',
-     ['CMD-SHELL', "mongosh --quiet --eval \"db.adminCommand('ping').ok\" || exit 1"],
+     ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping').ok"],
      '10s','5s',10,'30s'),
     (r'elasticsearch|opensearch',
      ['CMD-SHELL', 'curl -sf http://localhost:9200/_cluster/health || exit 1'],
@@ -1215,6 +1215,21 @@ def convert_named_to_bind(lines, vol_base, dry_run=False):
         return lines, 0
     _os.unlink(tmp.name)
 
+    # Build set of volumes declared external: true at top level
+    external_vols = set()
+    in_top_vols = False
+    current_vol = None
+    for line in lines:
+        if re.match(r'^volumes:\s*$', line):
+            in_top_vols = True; current_vol = None; continue
+        if in_top_vols:
+            if line and not line[0].isspace():
+                in_top_vols = False; current_vol = None; continue
+            m = re.match(r'^  ([a-zA-Z0-9_-]+):', line)
+            if m: current_vol = m.group(1)
+            if current_vol and 'external: true' in line:
+                external_vols.add(current_vol)
+
     # Build map of named_vol -> (svc_name, container_path)
     named_vols = {}
     for svc in services:
@@ -1238,7 +1253,11 @@ def convert_named_to_bind(lines, vol_base, dry_run=False):
                     parts = val.split(':')
                     vol_name = parts[0].strip()
                     cpath = ':'.join(parts[1:]).strip()
-                    if vol_name and not re.match(r'^[0-9]', vol_name) and '.' not in vol_name:
+                    if (vol_name and not re.match(r'^[0-9]', vol_name)
+                            and '.' not in vol_name
+                            and ' ' not in vol_name
+                            and re.match(r'^[a-zA-Z0-9_-]+$', vol_name)
+                            and vol_name not in external_vols):
                         named_vols[vol_name] = (svc_name, cpath)
 
     if not named_vols:
@@ -1255,7 +1274,8 @@ def convert_named_to_bind(lines, vol_base, dry_run=False):
                 parts = val.split(':')
                 vol_name = parts[0].strip()
                 cpath = ':'.join(parts[1:]).strip()
-                if vol_name in named_vols and not re.match(r'^[0-9]', vol_name):
+                if (vol_name in named_vols and not re.match(r'^[0-9]', vol_name)
+                        and re.match(r'^[a-zA-Z0-9_-]+$', vol_name)):
                     svc_name = named_vols[vol_name][0]
                     new_host = _os.path.join(vol_base, svc_name)
                     indent = len(line) - len(line.lstrip())
@@ -1418,13 +1438,47 @@ def inject_network_into_service(lines, svc, net_name, priority, dry_run=False):
 
 
 def ensure_network_declared(lines, net_name, subnet=None):
-    """Check if network is declared in these lines — does NOT add it here.
-    Adding is done by ensure_network_in_creator_file() instead."""
+    """Ensure network is declared in the TOP-LEVEL networks: section of this file.
+    Finds the EXISTING networks: section and adds there. Never creates a second one."""
+    # Check if already declared anywhere in top-level networks section
+    in_networks = False
     for line in lines:
-        if re.match(rf'^  {re.escape(net_name)}:', line.rstrip()):
-            return lines, False
-    # Not found in this file — signal that creator file needs updating
-    return lines, True
+        if re.match(r'^networks:\s*$', line):
+            in_networks = True
+            continue
+        if in_networks:
+            if re.match(r'^[a-zA-Z]', line) and not line.startswith(' '):
+                in_networks = False
+                continue
+            if re.match(rf'^  {re.escape(net_name)}[\s:{{]', line.rstrip()):
+                return lines, False  # already declared
+
+    # Not declared — find the top-level networks: section and add to it
+    net_section = None
+    for i, line in enumerate(lines):
+        if re.match(r'^networks:\s*$', line):
+            # Make sure this is the ONLY/FIRST one
+            net_section = i
+            break
+
+    new_entry = f"  {net_name}: {{driver: bridge, external: false}}"
+    new_lines = list(lines)
+
+    if net_section is not None:
+        # Insert right after networks: line
+        new_lines.insert(net_section + 1, new_entry)
+        return new_lines, True
+    else:
+        # No networks: section at all — add one before services:
+        for i, line in enumerate(new_lines):
+            if re.match(r'^services:\s*$', line):
+                new_lines.insert(i, new_entry)
+                new_lines.insert(i, 'networks:')
+                return new_lines, True
+        # Fallback: append at end
+        new_lines.append('networks:')
+        new_lines.append(new_entry)
+        return new_lines, True
 
 def ensure_network_in_creator_file(net_name, stacks_dir, subnet_base="10.50"):
     """Add network declaration to the appropriate creator file."""
@@ -1674,7 +1728,7 @@ def main():
     do_compose_net = on(cfg.get("FIX_AUTO_COMPOSE_NETWORK", "0"))
     compose_net_pri = int(cfg.get("FIX_AUTO_COMPOSE_NETWORK_PRIORITY", "200"))
 
-    if False and (auto_nets or do_link or do_compose_net):  # DISABLED: needs fixing
+    if auto_nets or do_link or do_compose_net:
         pr(f"\n{C}🌐 Network auto-injection{X}")
         _net_changes = 0
 
@@ -1741,8 +1795,14 @@ def main():
 
                 # Write file if changed
                 if changed and not dry_run:
+                    content = '\n'.join(l.rstrip('\n') for l in lines)
+                    # Safety: never write if duplicate top-level networks: exists
+                    net_count = len(re.findall(r'^networks:\s*$', content, re.MULTILINE))
+                    if net_count > 1:
+                        pr(f"  {R}✘ {stack_name}: duplicate networks: detected — skipping{X}")
+                        continue
                     _backup(f)
-                    open(f, 'w').write('\n'.join(l.rstrip('\n') for l in lines))
+                    open(f, 'w').write(content)
                     pr(f"  {G}✔ {stack_name}: networks injected{X}")
 
             except Exception as e:
