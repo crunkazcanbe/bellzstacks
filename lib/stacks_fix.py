@@ -1759,6 +1759,57 @@ def inject_global_keys(lines, svc, gi, dry_run=False):
     return new_lines, changes
 
 
+def inject_cpuset(lines, svc, gi, stack_prefix, dry_run=False):
+    """Inject cpuset and cpu_shares into a service. Add-only unless force."""
+    block = lines[svc['block_start']:svc['block_end']+1]
+    block_text = chr(10).join(block)
+    new_lines = list(lines)
+    changes = 0
+    insert_before = svc['block_end']
+
+    # Find insert point - before labels/healthcheck/deploy
+    for i in range(svc['block_start'], min(svc['block_end']+1, len(lines))):
+        if re.match(r'^    (labels|healthcheck|deploy|blkio):', lines[i]):
+            insert_before = i
+            break
+
+    force_all = on(gi.get('FORCE_ALL','0'))
+    force = force_all or on(gi.get('INJECT_CPUSET_FORCE','0'))
+
+    # Determine cpuset for this prefix
+    heavy_containers = gi.get('CPUSET_heavy_containers','').split()
+    if svc['name'] in heavy_containers:
+        cpuset = f"0-{(gi.get('CPUSET_all_cores') or str(__import__('os').cpu_count()-1))}"
+        shares = gi.get('CPU_SHARES_heavy','4096')
+    else:
+        cpuset = gi.get(f'CPUSET_{stack_prefix}',
+                 gi.get('CPUSET_default', '0'))
+        shares = gi.get('CPU_SHARES_default','256')
+
+    inserts = []
+    if force or 'cpuset:' not in block_text:
+        if force and 'cpuset:' in block_text:
+            new_lines = [re.sub(r'^    cpuset:.*', f'    cpuset: "{cpuset}"', l) for l in new_lines]
+            changes += 1
+        else:
+            inserts.append(f'    cpuset: "{cpuset}"')
+            changes += 1
+
+    if force or 'cpu_shares:' not in block_text:
+        if force and 'cpu_shares:' in block_text:
+            new_lines = [re.sub(r'^    cpu_shares:.*', f'    cpu_shares: {shares}', l) for l in new_lines]
+            changes += 1
+        else:
+            inserts.append(f'    cpu_shares: {shares}')
+            changes += 1
+
+    if inserts and not dry_run:
+        for ins in reversed(inserts):
+            new_lines.insert(insert_before, ins)
+
+    return new_lines, changes
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     dry_run = '--dry-run' in sys.argv[1:]
@@ -2078,6 +2129,44 @@ def main():
         if _gi_changes == 0:
             pr(f"  {G}✔ All global keys already present{X}")
         total += _gi_changes
+
+    # ── Phase 8: CPU core pinning ────────────────────────────────────────────
+    gi = load_global_inject_conf()
+    if _gi_enabled(gi.get('INJECT_CPUSET','0')):
+        pr(f"\n{C}🖥️  CPU core pinning{X}")
+        _cpu_changes = 0
+        for f in _files:
+            stack_name = os.path.basename(f).replace('.yml','').replace('.yaml','')
+            # Get stack prefix
+            m = re.match(r'^([a-zA-Z]+)', stack_name)
+            stack_prefix = m.group(1) if m else stack_name
+            try:
+                services, _raw = parse_services_with_positions(f)
+                file_lines = [l.rstrip('\n') for l in _raw]
+                real_svcs = [s for s in services
+                            if not s['name'].startswith('provisioner')
+                            and s.get('image','')
+                            and not re.match(r'^alpine(:|$)', s.get('image',''))]
+                if not real_svcs:
+                    continue
+                changed = False
+                lines = list(file_lines)
+                for svc in real_svcs:
+                    lines, changes = inject_cpuset(lines, svc, gi, stack_prefix, dry_run)
+                    if changes > 0:
+                        _cpu_changes += changes
+                        changed = True
+                        if dry_run:
+                            pr(f"  {Y}[dry-run] " + svc['name'] + f": cpuset would be set{X}")
+                if changed and not dry_run:
+                    _backup(f)
+                    open(f, 'w').write('\n'.join(lines))
+                    pr(f"  {G}✔ {stack_name}: CPU pinning applied{X}")
+            except Exception as e:
+                pr(f"  {R}✘ {stack_name}: {e}{X}")
+        if _cpu_changes == 0:
+            pr(f"  {G}✔ All CPU assignments already present{X}")
+        total += _cpu_changes
 
 
     pr(f"\n{G}✨ Done — {total} change(s){'(dry-run, none written)' if dry_run else ''}{X}\n")

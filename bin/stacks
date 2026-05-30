@@ -101,50 +101,10 @@ cat > "$_CONF_DIR/stack_urls.conf" << 'CONF_EOF'
 CONF_EOF
 fi
 
-# global_inject.conf
+# global_inject.conf — auto-generated with stack-prefix CPU assignments
 if [ ! -f "$_CONF_DIR/global_inject.conf" ]; then
-cat > "$_CONF_DIR/global_inject.conf" << 'CONF_EOF'
-# ==============================================================================
-# global_inject.conf — Keys injected into every service by stacks fix
-# Values: 0=disabled, 1=add-only, force=always override
-# _FORCE=1 forces individual key. FORCE_ALL=1 forces everything.
-# Anchor keys → x-common-caps block. Service keys → each service.
-# ==============================================================================
-FORCE_ALL=0
-INJECT_STOP_GRACE=1
-INJECT_STOP_GRACE_FORCE=0
-STOP_GRACE_PERIOD=120s
-STOP_SIGNAL=SIGTERM
-INJECT_LOGGING=1
-INJECT_LOGGING_FORCE=0
-LOGGING_DRIVER=json-file
-LOGGING_MAX_SIZE=50m
-LOGGING_MAX_FILE=5
-INJECT_RESTART=0
-INJECT_RESTART_FORCE=0
-RESTART_POLICY=unless-stopped
-INJECT_DEPLOY=0
-INJECT_DEPLOY_FORCE=0
-DEPLOY_MEMORY_LIMIT=2G
-DEPLOY_CPU_LIMIT=0.20
-DEPLOY_MEMORY_RESERVATION=256M
-INJECT_BLKIO=0
-INJECT_BLKIO_FORCE=0
-BLKIO_WEIGHT=500
-BLKIO_READ_BPS=750mb
-BLKIO_WRITE_BPS=750mb
-INJECT_ULIMITS=0
-INJECT_ULIMITS_FORCE=0
-ULIMIT_NOFILE_SOFT=65535
-ULIMIT_NOFILE_HARD=65535
-ULIMIT_NPROC=65535
-[custom_anchor]
-[/custom_anchor]
-[custom_service]
-[/custom_service]
-CONF_EOF
+  python3 /usr/local/lib/stacks_gen_gi.py "$_CONF_DIR/global_inject.conf" "${STACKS_DIR:-/srv/stacks/Stacks}"
 fi
-
 # menu.conf
 if [ ! -f "$_CONF_DIR/menu.conf" ]; then
 cat > "$_CONF_DIR/menu.conf" << 'CONF_EOF'
@@ -836,6 +796,8 @@ self_heal_service() {
       
       for i in {153..253}; do
           local candidate_ip="192.168.1.$i"
+          # Skip locked IPs
+          if echo "${LOCKED_IPS:-}" | tr ',' '\n' | grep -qx "$candidate_ip"; then continue; fi
           
           # Check if this specific IP:PORT is already written in ANY yaml to avoid obvious collisions
           if grep -qR "$candidate_ip:$old_port" "$STACKS_DIR"/*.yml 2>/dev/null; then
