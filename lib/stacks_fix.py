@@ -61,6 +61,14 @@ def load_conf():
         "FIX_DEEP_INSPECT": "1",
         "FIX_SUBNET_BASE": "10.50",
         "FIX_BACKUP": "1",
+        "FIX_VOLUME_BASE": "/srv/stacks/docker",  # base path for bind mounts
+        "FIX_VOLUME_CONTAINER_PATH": "/config",          # default container-side path
+        "FIX_AUTO_BIND_MOUNTS": "0",                     # auto-add bind mount if service has none
+        "FIX_AUTO_NAMED_VOLUMES": "0",                   # auto-add named volume if service has none
+        "FIX_CONVERT_NAMED_TO_BIND": "0",                # convert named volumes to bind mounts
+        "FIX_CREATE_VOLUME_DIRS": "1",                   # auto-create host directories for bind mounts
+        "FIX_AUTO_NETWORKS": "",                         # space-separated networks to add to every service
+        "FIX_AUTO_LINK_NETWORKS": "0",                   # auto-gen stackname_net for stacks with 2+ services
         "FIX_REMOVE_GAPS": "1",  # set to 0 to disable blank line removal in service blocks
         "FIX_HC_IGNORE_STACKS": "",  # space-separated stack files to skip healthcheck changes
         "FIX_REPLACE_BROKEN_HC": "0",  # set to 1 to replace actively-failing healthchecks
@@ -1093,6 +1101,114 @@ def remove_gaps_from_file(filepath, dry_run=False):
         return True
     return False
 
+
+def get_bind_mounts(svc_block_lines):
+    """Extract host-side paths from bind mount volume entries."""
+    mounts = []
+    in_volumes = False
+    for line in svc_block_lines:
+        stripped = line.strip()
+        if re.match(r'^volumes:\s*$', stripped):
+            in_volumes = True
+            continue
+        if in_volumes:
+            if stripped.startswith('-'):
+                val = stripped.lstrip('- ').strip().strip('"').strip("'")
+                if val.startswith('/'):
+                    host_path = val.split(':')[0]
+                    mounts.append(host_path)
+            elif stripped and not stripped.startswith('#'):
+                indent = len(line) - len(line.lstrip())
+                if indent <= 4:
+                    in_volumes = False
+    return mounts
+
+def create_volume_dirs(paths, dry_run=False):
+    """Create host directories for bind mounts if they don't exist."""
+    created = []
+    for path in paths:
+        if not os.path.exists(path):
+            if dry_run:
+                created.append(f"[dry-run] would create: {path}")
+            else:
+                try:
+                    os.makedirs(path, mode=0o755, exist_ok=True)
+                    created.append(f"created: {path}")
+                except Exception as e:
+                    created.append(f"failed: {path} ({e})")
+    return created
+
+def convert_named_to_bind(lines, vol_base, dry_run=False):
+    """
+    Convert named volume references to bind mounts.
+    Uses parse_services_with_positions to correctly identify services.
+    """
+    import tempfile, os as _os
+
+    # Write lines to temp file to use existing parser
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False)
+    tmp.write('\n'.join(lines))
+    tmp.close()
+
+    try:
+        services, _ = parse_services_with_positions(tmp.path if hasattr(tmp, 'path') else tmp.name)
+    except:
+        _os.unlink(tmp.name)
+        return lines, 0
+    _os.unlink(tmp.name)
+
+    # Build map of named_vol -> (svc_name, container_path)
+    named_vols = {}
+    for svc in services:
+        svc_name = svc['name']
+        in_vol = False
+        for i in range(svc['block_start'], min(svc['block_end']+1, len(lines))):
+            line = lines[i]
+            stripped = line.strip()
+            indent = len(line) - len(line.lstrip())
+            # Enter volumes block
+            if re.match(r'^\s+volumes:\s*$', line):
+                in_vol = True
+                continue
+            # Exit volumes block
+            if in_vol and stripped and not stripped.startswith('-') and not stripped.startswith('#'):
+                if indent <= 4:
+                    in_vol = False
+            if in_vol and stripped.startswith('-'):
+                val = stripped.lstrip('- ').strip().strip('"').strip("'")
+                if ':' in val and not val.startswith('/') and not val.startswith('.'):
+                    parts = val.split(':')
+                    vol_name = parts[0].strip()
+                    cpath = ':'.join(parts[1:]).strip()
+                    if vol_name and not re.match(r'^[0-9]', vol_name) and '.' not in vol_name:
+                        named_vols[vol_name] = (svc_name, cpath)
+
+    if not named_vols:
+        return lines, 0
+
+    # Replace named vol references with bind mounts
+    result = []
+    changes = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('-'):
+            val = stripped.lstrip('- ').strip().strip('"').strip("'")
+            if ':' in val and not val.startswith('/') and not val.startswith('.'):
+                parts = val.split(':')
+                vol_name = parts[0].strip()
+                cpath = ':'.join(parts[1:]).strip()
+                if vol_name in named_vols and not re.match(r'^[0-9]', vol_name):
+                    svc_name = named_vols[vol_name][0]
+                    new_host = _os.path.join(vol_base, svc_name)
+                    indent = len(line) - len(line.lstrip())
+                    new_line = ' ' * indent + f'- "{new_host}:{cpath}"'
+                    result.append(new_line if not dry_run else line)
+                    changes += 1
+                    continue
+        result.append(line)
+
+    return result, changes
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     dry_run = '--dry-run' in sys.argv[1:]
@@ -1190,6 +1306,7 @@ def main():
             total += fix_healthchecks(f, cfg, svc, dry_run, replace_broken)
 
 
+    _files = files  # alias for phase 4/5
     # ── Phase 4: remove blank lines inside service blocks ──
     if on(cfg.get("FIX_REMOVE_GAPS", "1")):
         pr(f"\n{C}🧹 Removing gaps in service blocks{X}")
@@ -1210,6 +1327,54 @@ def main():
         if _gaps_fixed == 0:
             pr(f"  {G}✔ No gaps found{X}")
         total += _gaps_fixed
+
+
+    # ── Phase 5: Volume management ──────────────────────────────────────────
+    vol_base = cfg.get("FIX_VOLUME_BASE", "/srv/stacks/docker")
+    vol_cpath = cfg.get("FIX_VOLUME_CONTAINER_PATH", "/config")
+
+    if on(cfg.get("FIX_CREATE_VOLUME_DIRS", "1")):
+        pr(f"\n{C}📁 Volume directories{X}")
+        _dirs_created = 0
+        _dirs_checked = 0
+        for f in _files:
+            try:
+                file_lines = open(f).readlines()
+                mounts = get_bind_mounts([l.rstrip() for l in file_lines])
+                _dirs_checked += len(mounts)
+                results = create_volume_dirs(mounts, dry_run)
+                for r in results:
+                    pr(f"  {G}✔ {r}{X}")
+                    _dirs_created += 1
+            except:
+                pass
+        if _dirs_created > 0:
+            pr(f"  {G}✔ {_dirs_created} director(ies) created{X}")
+        else:
+            pr(f"  {G}✔ All {_dirs_checked} bind mount dirs already exist{X}")
+
+    if on(cfg.get("FIX_CONVERT_NAMED_TO_BIND", "0")):
+        pr(f"\n{C}🔄 Converting named volumes to bind mounts{X}")
+        _conv_total = 0
+        for f in _files:
+            try:
+                file_lines = open(f).readlines()
+                new_lines, changes = convert_named_to_bind(
+                    [l.rstrip() for l in file_lines], vol_base, dry_run)
+                if changes > 0:
+                    if dry_run:
+                        pr(f"  {Y}[dry-run] {os.path.basename(f)}: {changes} named→bind{X}")
+                    else:
+                        _backup(f)
+                        open(f, 'w').write('\n'.join(new_lines))
+                        pr(f"  {G}✔ {os.path.basename(f)}: {changes} named→bind{X}")
+                    _conv_total += changes
+            except Exception as e:
+                pr(f"  {R}✘ {os.path.basename(f)}: {e}{X}")
+        if _conv_total == 0:
+            pr(f"  {G}✔ No named volumes found{X}")
+        total += _conv_total
+
 
     pr(f"\n{G}✨ Done — {total} change(s){'(dry-run, none written)' if dry_run else ''}{X}\n")
 
