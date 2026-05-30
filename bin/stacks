@@ -1326,10 +1326,9 @@ list_snapshots() {
 # ==============================================================================
 # ── PRE-DEPLOY BACKUP HANDLER ────────────────────────────────────────────────
 if [ "$DO_BACKUP_PRE" -eq 1 ]; then
-  echo -e "\n\e[1;35m📸 Taking snapshot before deploy...\e[0m"
   _snap_label="pre_deploy"
   [ -n "$TARGET_STACK" ] && _snap_label="pre_${TARGET_STACK}"
-  take_snapshot "$_snap_label"
+  take_snapshot "$_snap_label" >/dev/null 2>&1
   # If this is a standalone backup (not combined with up), exit here
   if [ "$COMMAND" != "up" ] && [ "$COMMAND" != "down" ]; then
     exit 0
