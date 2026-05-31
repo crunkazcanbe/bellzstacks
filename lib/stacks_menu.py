@@ -79,10 +79,12 @@ def get_stacks():
                 content = open(path).read()
                 total = len(re.findall(r'^\s{2}[a-zA-Z0-9_-]+:\s*$', content, re.MULTILINE))
             except: total = 0
+            try: fsize = os.path.getsize(path) // 1024
+            except: fsize = 0
             stacks.append({
                 'name': name, 'running': running,
                 'stopped': stopped, 'total': total,
-                'file': path
+                'file': path, 'size_kb': fsize
             })
     except: pass
     return stacks
@@ -1258,7 +1260,7 @@ def do_container_action(stdscr, container_name, stack_file, action):
 TABS = ['Containers', 'Stacks', 'Logs', 'Dynamics', 'Art', 'Backup', 'Build', 'Configs']
 
 def draw_containers_tab(win, h, w, containers, sel, scroll):
-    win.addstr(3, 2, f'{"NAME":<35} {"STATUS":<12} {"IMAGE":<30}',
+    win.addstr(3, 2, f'{"NAME":<29} {"STATUS":<10} {"MEMORY":<16} {"IMAGE":<20}',
                curses.color_pair(C_ACCENT))
     win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
 
@@ -1279,16 +1281,21 @@ def draw_containers_tab(win, h, w, containers, sel, scroll):
         color = C_RUNNING if is_running else C_STOPPED
         indicator = '●' if is_running else '○'
 
-        line = f'{indicator} {name:<34} {status:<12} {image}'
+        mem = c.get('mem','')[:14]
+        line = f'{indicator} {name:<28} {status:<10} {mem:<16} {image}'
         if idx == sel:
-            win.addstr(y, 2, line[:w-4], curses.color_pair(C_SELECTED))
+            try: win.addstr(y, 2, line[:w-4], curses.color_pair(C_SELECTED))
+            except: pass
         else:
-            win.addstr(y, 2, f'{indicator} ', curses.color_pair(color))
-            win.addstr(y, 4, f'{name:<34} {status:<12} {image}'[:w-6],
-                      curses.color_pair(C_NORMAL))
+            try:
+                win.addstr(y, 2, f'{indicator} ', curses.color_pair(color))
+                win.addstr(y, 4, f'{name:<28} {status:<10} ', curses.color_pair(C_NORMAL))
+                win.addstr(y, 44, f'{mem:<16}', curses.color_pair(C_YELLOW if mem else C_DIM))
+                win.addstr(y, 60, f'{image}'[:w-62], curses.color_pair(C_DIM))
+            except: pass
 
 def draw_stacks_tab(win, h, w, stacks, sel, scroll):
-    win.addstr(3, 2, f'{"STACK":<25} {"RUN":>4} {"STOP":>5} {"TOTAL":>6} {"STATUS":<10}',
+    win.addstr(3, 2, f'{"STACK":<18} {"RUN/TOT":<7} {"SIZE":>5}  {"STATUS":<10}',
                curses.color_pair(C_ACCENT))
     win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
 
@@ -1314,14 +1321,19 @@ def draw_stacks_tab(win, h, w, stacks, sel, scroll):
             status = '● UP'
             color  = C_RUNNING
 
-        line = f'{name:<25} {running:>4} {stopped:>5} {total:>6}  {status}'
+        size_kb = s.get('size_kb', 0)
+        size_str = f'{size_kb}K' if size_kb < 1000 else f'{size_kb//1000}M'
+        line = f'{name:<18} {running:>3}/{total:<3} {size_str:>5}  {status}'
         if idx == sel:
-            win.addstr(y, 2, line[:w-4], curses.color_pair(C_SELECTED))
+            try: win.addstr(y, 2, line[:w-4], curses.color_pair(C_SELECTED))
+            except: pass
         else:
-            win.addstr(y, 2, f'{name:<25} {running:>4} {stopped:>5} {total:>6}  ',
-                      curses.color_pair(C_NORMAL))
-            win.addstr(y, 2+len(f'{name:<25} {running:>4} {stopped:>5} {total:>6}  '),
-                      status[:w-4], curses.color_pair(color))
+            try:
+                win.addstr(y, 2, f'{name:<18} {running:>3}/{total:<3} {size_str:>5}  ',
+                          curses.color_pair(C_NORMAL))
+                win.addstr(y, 2+len(f'{name:<18} {running:>3}/{total:<3} {size_str:>5}  '),
+                          status[:w-4], curses.color_pair(color))
+            except: pass
 
 def draw_logs_tab(win, h, w, log_lines, sel, scroll):
     try:
