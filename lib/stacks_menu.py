@@ -368,6 +368,8 @@ def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
 def _bw_select(popup, pw, ph, prompt, items, bar_w, pct, title, spinner, frame):
     """Scrollable list selection inside popup."""
     if not items: return None
+    # Add cancel option
+    items = list(items) + ["✕  Cancel"]
     sel = 0; scroll = 0
     visible = ph - 6
     popup.nodelay(False)
@@ -402,10 +404,10 @@ def _bw_select(popup, pw, ph, prompt, items, bar_w, pct, title, spinner, frame):
         elif k == curses.KEY_DOWN:
             if sel < len(items)-1: sel += 1
             if sel >= scroll + visible: scroll = sel - visible + 1
-        elif k in (10, 13): return items[sel]
-        elif k == 27: return None
-        elif k == 3: return None  # Ctrl+C = back
-        elif k == curses.KEY_F1: return None
+        elif k in (10, 13):
+            if items[sel] == "✕  Cancel": return None
+            return items[sel]
+        elif k in (27, 3, curses.KEY_F1): return None
 
 
 def _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame):
@@ -623,7 +625,7 @@ def _registry_search_inner(stdscr, term, bar_w, pct, title, spinner, frame):
 
             # Footer
             total = len(get_visible())
-            try: popup.addstr(ph-2, 2, f"[{total} results]  ◀▶=Registry  letters=filter  /=search  ESC=cancel"[:pw-4], curses.color_pair(C_DIM))
+            try: popup.addstr(ph-2, 2, f"[{total}]  ◀▶ reg  ↑↓ scroll  ENTER select  ESC/Q cancel"[:pw-4], curses.color_pair(C_DIM))
             except: pass
             popup.refresh()
         except: pass
@@ -692,9 +694,7 @@ def _registry_search_inner(stdscr, term, bar_w, pct, title, spinner, frame):
             if visible_items and sel[0] < len(visible_items):
                 return visible_items[sel[0]].get("pull","")
             return None
-        elif k == 27:
-            return None
-        elif k == 3:  # Ctrl+C
+        elif k in (27, 3, ord("q"), ord("Q")):
             return None
 
 def run_build_wizard(stdscr, new_stack=False):
@@ -1213,6 +1213,8 @@ def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
 def _bw_select(popup, pw, ph, prompt, items, bar_w, pct, title, spinner, frame):
     """Scrollable list selection inside popup."""
     if not items: return None
+    # Add cancel option
+    items = list(items) + ["✕  Cancel"]
     sel = 0; scroll = 0
     visible = ph - 6
     popup.nodelay(False)
@@ -1247,10 +1249,10 @@ def _bw_select(popup, pw, ph, prompt, items, bar_w, pct, title, spinner, frame):
         elif k == curses.KEY_DOWN:
             if sel < len(items)-1: sel += 1
             if sel >= scroll + visible: scroll = sel - visible + 1
-        elif k in (10, 13): return items[sel]
-        elif k == 27: return None
-        elif k == 3: return None  # Ctrl+C = back
-        elif k == curses.KEY_F1: return None
+        elif k in (10, 13):
+            if items[sel] == "✕  Cancel": return None
+            return items[sel]
+        elif k in (27, 3, curses.KEY_F1): return None
 
 
 def _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame):
