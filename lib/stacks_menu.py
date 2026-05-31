@@ -326,7 +326,6 @@ def run_sequence_popup(stdscr, title, steps):
                 new_lines = read_new_log_lines(log_positions)
                 if new_lines:
                     last_log[0] = new_lines[-1]
-                    except: pass
                 frame += 1
                 draw(i, slabel)
                 _t.sleep(0.1)
