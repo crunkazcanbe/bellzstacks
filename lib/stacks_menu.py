@@ -11,6 +11,7 @@ from datetime import datetime
 STACKS_DIR = "/srv/stacks/Stacks"
 CONF_DIR   = os.path.expanduser("~/.config/stacks")
 STACKS_BIN = "/usr/local/bin/stacks"
+DYNAMICS_DIR = "/srv/stacks/Configs/Dynamics"
 
 # ── Color pairs ──────────────────────────────────────────────────────────────
 C_HEADER    = 1
@@ -375,6 +376,8 @@ STACK_ACTIONS = [
     ("↓  Scale OFF",                          "scale_off"),
     ("↑  Proxy ON",                           "proxy_on"),
     ("↓  Proxy OFF",                          "proxy_off"),
+    ("🎨  Art Inject",                          "art_inject"),
+    ("🧹  Art Strip",                           "art_strip"),
     ("✕  Cancel",                             None),
 ]
 
@@ -476,6 +479,14 @@ def do_stack_action(stdscr, stack_name, action):
         run_log_popup(stdscr, f'Up → {stack_name}',
                      f'{STACKS_BIN} up {stack_name}')
         return
+    elif action == 'art_inject':
+        run_log_popup(stdscr, f'Art inject: {stack_name}',
+            f'{STACKS_BIN} art inject {stack_name}')
+        return
+    elif action == 'art_strip':
+        run_log_popup(stdscr, f'Art strip: {stack_name}',
+            f'{STACKS_BIN} art strip {stack_name}')
+        return
     else: return
     run_log_popup(stdscr, f'{action} → {stack_name}', cmd)
 
@@ -513,7 +524,7 @@ def do_container_action(stdscr, container_name, stack_file, action):
     run_log_popup(stdscr, f'{action} → {container_name}', cmd)
 
 # ── Tab views ────────────────────────────────────────────────────────────────
-TABS = ['Containers', 'Stacks', 'Logs', 'Backup', 'Build', 'Configs']
+TABS = ['Containers', 'Stacks', 'Logs', 'Dynamics', 'Art', 'Backup', 'Build', 'Configs']
 
 def draw_containers_tab(win, h, w, containers, sel, scroll):
     win.addstr(3, 2, f'{"NAME":<35} {"STATUS":<12} {"IMAGE":<30}',
@@ -602,7 +613,46 @@ def draw_logs_tab(win, h, w, log_lines, sel, scroll):
     except: pass
     return sources
 
+def draw_dynamics_tab(win, h, w, sel):
+    try:
+        import glob as _g
+        win.addstr(3, 2, "DYNAMIC CONFIGS  [ A = inject art into selected ]", curses.color_pair(C_ACCENT))
+        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        files = sorted(_g.glob(f"{DYNAMICS_DIR}/*.yml") + _g.glob(f"{DYNAMICS_DIR}/*.yaml"))
+        for i, f in enumerate(files):
+            y = 5 + i
+            if y >= h-2: break
+            label = os.path.basename(f)
+            if i == sel:
+                try: win.addstr(y, 2, f"  ▶  {label:<50}", curses.color_pair(C_SELECTED))
+                except: pass
+            else:
+                try: win.addstr(y, 2, f"     {label:<50}", curses.color_pair(C_NORMAL))
+                except: pass
+        return files
+    except: return []
+
+def draw_art_tab(win, h, w):
+    try:
+        win.addstr(3, 2, "ART INJECTION", curses.color_pair(C_ACCENT))
+        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        actions = [
+            ("I", "Inject art into ALL stacks"),
+            ("S", "Strip art from ALL stacks"),
+            ("D", "Inject art into ALL dynamics"),
+            ("X", "Strip art from ALL dynamics"),
+            ("E", "Edit art.conf (art config)"),
+            ("U", "Edit stack_urls.conf (URLs config)"),
+        ]
+        for i, (key, desc) in enumerate(actions):
+            try:
+                win.addstr(6+i, 4, f"[{key}]", curses.color_pair(C_ACCENT))
+                win.addstr(6+i, 9, desc, curses.color_pair(C_NORMAL))
+            except: pass
+    except: pass
+
 def draw_backup_tab(win, h, w):
+
 
     win.addstr(3, 2, 'BACKUP', curses.color_pair(C_ACCENT))
     win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
@@ -679,7 +729,9 @@ def main(stdscr):
     FOOTER_HINTS = {
         0: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Action', 'Q Quit'],
         1: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Action', 'A All-Stacks', 'Q Quit'],
-        2: ['↑↓ Select Source', '↔ Switch Tab', 'ENTER View Logs', 'Q Quit'],
+        2: ['↑↓ Select', '↔ Tab', 'ENTER Open', 'Q Quit'],
+        3: ['↑↓ Select', '↔ Tab', 'ENTER Edit', 'A Inject Art', 'Q Quit'],
+        4: ['I Inject All', 'S Strip All', 'D Dyn Inject', 'X Dyn Strip', 'E Edit Art Conf', 'Q Quit'],
         2: ['↔ Switch Tab', 'Q Quit'],
         3: ['↔ Switch Tab', 'Q Quit'],
         4: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Edit', 'Q Quit'],
@@ -714,10 +766,14 @@ def main(stdscr):
         elif tab == 2:
             log_sources = draw_logs_tab(stdscr, h, w, [], sel, scroll)
         elif tab == 3:
-            draw_backup_tab(stdscr, h, w)
+            dyn_files = draw_dynamics_tab(stdscr, h, w, sel)
         elif tab == 4:
-            draw_build_tab(stdscr, h, w)
+            draw_art_tab(stdscr, h, w)
         elif tab == 5:
+            draw_backup_tab(stdscr, h, w)
+        elif tab == 6:
+            draw_build_tab(stdscr, h, w)
+        elif tab == 7:
             draw_configs_tab(stdscr, h, w, cfg_sel)
 
         draw_footer(stdscr, h, w, FOOTER_HINTS.get(tab, []))
@@ -806,7 +862,40 @@ def main(stdscr):
                 init_colors()
                 curses.curs_set(0)
                 stdscr.clear()
-        elif tab == 3:  # Backup
+        elif tab == 3:  # Dynamics
+            import glob as _g
+            dyn_files = sorted(_g.glob(f'{DYNAMICS_DIR}/*.yml') + _g.glob(f'{DYNAMICS_DIR}/*.yaml'))
+            if k == curses.KEY_UP: sel = max(0, sel-1)
+            elif k == curses.KEY_DOWN: sel = min(len(dyn_files)-1, sel+1)
+            elif k in (10, 13) and dyn_files:
+                editor = os.environ.get('EDITOR', 'nano')
+                curses.endwin()
+                os.system(f'{editor} {dyn_files[sel]}')
+                stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+            elif k in (ord('a'), ord('A')) and dyn_files:
+                fname = os.path.basename(dyn_files[sel]).replace('.yml','').replace('.yaml','')
+                run_log_popup(stdscr, f'Art inject: {fname}',
+                    f'{STACKS_BIN} art dynamic inject {dyn_files[sel]}')
+        elif tab == 4:  # Art
+            if k in (ord('i'), ord('I')):
+                run_log_popup(stdscr, 'Art inject ALL stacks', f'{STACKS_BIN} art inject all')
+            elif k in (ord('s'), ord('S')):
+                run_log_popup(stdscr, 'Art strip ALL stacks', f'{STACKS_BIN} art strip all')
+            elif k in (ord('d'), ord('D')):
+                run_log_popup(stdscr, 'Art inject ALL dynamics', f'{STACKS_BIN} art dynamic inject all')
+            elif k in (ord('x'), ord('X')):
+                run_log_popup(stdscr, 'Art strip ALL dynamics', f'{STACKS_BIN} art dynamic strip all')
+            elif k in (ord('e'), ord('E')):
+                editor = os.environ.get('EDITOR', 'nano')
+                curses.endwin()
+                os.system(f'{editor} {CONF_DIR}/art.conf')
+                stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+            elif k in (ord('u'), ord('U')):
+                editor = os.environ.get('EDITOR', 'nano')
+                curses.endwin()
+                os.system(f'{editor} {CONF_DIR}/stack_urls.conf')
+                stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+        elif tab == 5:  # Backup
             if k == ord('b') or k == ord('B'):
                 run_log_popup(stdscr, 'Backup', f'{STACKS_BIN} backup')
             elif k == ord('p') or k == ord('P'):
@@ -814,13 +903,13 @@ def main(stdscr):
             elif k == ord('l') or k == ord('L'):
                 run_log_popup(stdscr, 'Backup Log', 'cat /tmp/stacks_backup.log 2>/dev/null || echo "No log found"')
 
-        elif tab == 4:  # Build
+        elif tab == 6:  # Build
             if k == ord('g') or k == ord('G'):
                 run_log_popup(stdscr, 'Gen Dynamics', f'{STACKS_BIN} gen dynamics')
             elif k == ord('i') or k == ord('I'):
                 run_log_popup(stdscr, 'Gen Inject', f'python3 /usr/local/lib/stacks_gen_gi.py {CONF_DIR}/global_inject.conf {STACKS_DIR}')
 
-        elif tab == 5:  # Configs
+        elif tab == 7:  # Configs
             if k == curses.KEY_UP:
                 cfg_sel = max(0, cfg_sel - 1)
             elif k == curses.KEY_DOWN:
