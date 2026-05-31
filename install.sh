@@ -1,13 +1,21 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# stacks installer
 set -e
-echo "🚀 Installing Upgraded Modular Stacks Engine Layout..."
 
-/usr/bin/mkdir -p /usr/local/bin
-/usr/bin/mkdir -p /usr/local/lib
+echo "Installing stacks..."
 
-/usr/bin/sudo /usr/bin/cp ./bin/stacks /usr/local/bin/
-/usr/bin/sudo /usr/bin/cp ./lib/*.py /usr/local/lib/
+# Directories
+mkdir -p /usr/local/lib
+mkdir -p ~/.config/stacks
 
-/usr/bin/sudo /usr/bin/chmod +x /usr/local/bin/stacks
+# Install main script
+cp bin/stacks /usr/local/bin/stacks
+chmod +x /usr/local/bin/stacks
 
-echo "✅ Sequence Complete. Core layout successfully deployed!"
+# Install lib files
+for f in lib/*.py; do
+    cp "$f" /usr/local/lib/
+done
+
+echo "Done. Run: stacks ls"
+echo "TUI:  stacks menu"

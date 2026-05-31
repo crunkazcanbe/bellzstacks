@@ -215,7 +215,7 @@ CONTINUE_COUNT=-1
 
 for arg in "$@"; do
   # Catch the primary action command first
-  if [ -z "$COMMAND" ] && [[ "${arg,,}" =~ ^(up|down|start|stop|restart|rm|snapshot|get|kill|ls|status|logs|inspect|pull|build|volume|network|dynamics|reload|clean|search|regsearch|inject|strip|art|backup|describe|gen|fix|custom|scale|proxy)$ ]]; then
+  if [ -z "$COMMAND" ] && [[ "${arg,,}" =~ ^(up|down|start|stop|restart|rm|snapshot|get|kill|ls|status|logs|inspect|pull|build|volume|network|dynamics|reload|clean|search|regsearch|inject|strip|art|backup|describe|gen|fix|custom|scale|proxy|menu)$ ]]; then
      COMMAND="${arg,,}"
      continue
   fi
@@ -348,7 +348,7 @@ if [ "$DO_ATTACH" -eq 1 ]; then
   fi
 fi
 
-if [ -n "$TARGET_STACK" ] && [ ! -f "$STACKS_DIR/$TARGET_STACK.yml" ] && [[ ! "$COMMAND" =~ ^(regsearch|get|kill|status|ls|clean|reload|search|build|pull|logs|inspect|volume|network|dynamics|inject|strip|art|backup|gen|fix|scale|proxy)$ ]]; then
+if [ -n "$TARGET_STACK" ] && [ ! -f "$STACKS_DIR/$TARGET_STACK.yml" ] && [[ ! "$COMMAND" =~ ^(regsearch|get|kill|status|ls|clean|reload|search|build|pull|logs|inspect|volume|network|dynamics|inject|strip|art|backup|gen|fix|scale|proxy|menu)$ ]]; then
   printf "\e[?25h"
   echo -e "\e[1;31m✘ Error: Stack $TARGET_STACK.yml not found in $STACKS_DIR\e[0m"
   exit 1
@@ -3034,6 +3034,14 @@ elif [ "$COMMAND" == "scale" ]; then
   echo -e "\e[1;32m✨ SUCCESS: Scale ${_scale_state^^} applied to $_scale_changed stack(s). Run 'stacks up <stack> recreate' to deploy.\e[0m"
   exit 0
 
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: MENU (interactive TUI)
+# Usage: stacks menu
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "menu" ]; then
+  printf "\e[?25h"
+  exec python3 /usr/local/lib/stacks_menu.py
 
 # ---------------------------------------------------------
 # COMMAND BRANCH: PROXY (traefik.enable toggle)
