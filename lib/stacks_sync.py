@@ -45,49 +45,108 @@ def parse_stack(fpath):
     return services
 
 def sync_descriptions(stack_name, services, default_desc):
-    """Add missing services to descriptions file."""
+    """Add missing services, remove deleted ones from descriptions file."""
     os.makedirs(DESC_DIR, exist_ok=True)
     desc_file = os.path.join(DESC_DIR, f"{stack_name}.conf")
     try: existing = open(desc_file).read()
     except: existing = f"# {stack_name} — Service Descriptions\n# Edit the description under each service name.\n#\n"
-    
-    added = 0
+
+    # Build set of valid service names (normalize dash/underscore)
+    valid = set()
     for svc, img in services:
-        # Normalize - treat dash and underscore as same
+        valid.add(svc)
+        valid.add(svc.replace("-","_"))
+        valid.add(svc.replace("_","-"))
+
+    # Parse existing file into blocks
+    # Header = lines before first service entry
+    # Each block = service name line + following # lines
+    header_lines = []
+    blocks = {}  # {svc_name: [lines]}
+    current_svc = None
+    in_header = True
+
+    for line in existing.split("\n"):
+        stripped = line.strip()
+        # Check if this line is a bare service name (no # prefix, not empty, not yaml key)
+        if stripped and not stripped.startswith("#") and not ":" in stripped and not stripped.startswith("-"):
+            in_header = False
+            current_svc = stripped
+            blocks[current_svc] = []
+        elif in_header:
+            header_lines.append(line)
+        elif current_svc is not None:
+            blocks[current_svc].append(line)
+
+    # Rebuild: keep header, keep valid services, add missing ones
+    added = removed = 0
+    result = "\n".join(header_lines).rstrip("\n")
+
+    for svc_name, svc_lines in blocks.items():
+        if svc_name in valid:
+            result += f"\n\n{svc_name}\n" + "\n".join(svc_lines).strip("\n")
+        else:
+            removed += 1
+
+    # Add missing services
+    for svc, img in services:
         svc_norm = svc.replace("-","_")
-        exists = re.search(rf"^{re.escape(svc)}\s*$", existing, re.MULTILINE)
-        exists_norm = re.search(rf"^{re.escape(svc_norm)}\s*$", existing, re.MULTILINE)
-        if not exists and not exists_norm:
-            existing += f"\n{svc}\n# {default_desc}\n"
+        if svc not in blocks and svc_norm not in blocks and svc.replace("_","-") not in blocks:
+            result += f"\n\n{svc}\n# {default_desc}"
             added += 1
-    
-    if added:
-        open(desc_file, "w").write(existing)
-    return added
+
+    result = result.strip("\n") + "\n"
+
+    if added or removed:
+        open(desc_file, "w").write(result)
+
+    return added, removed
 
 def sync_all_services(stack_name, services):
-    """Update all_services.txt with new services."""
+    """Update all_services.txt - add new, remove deleted."""
     try: existing = open(SVC_FILE).read()
     except: existing = "# ALL SERVICES — StacksServer\n# Format: stack | service | image\n# =========================================\n"
-    
-    added = 0
+
+    valid_names = {svc for svc, img in services}
     section = f"# ── {stack_name.upper()}"
+    lines = existing.split("\n")
+    new_lines = []
+    added = removed = 0
+
+    for line in lines:
+        # Check if this is a service line for this stack
+        if line.startswith(stack_name) and "|" in line:
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 2:
+                svc = parts[1].strip()
+                if svc in valid_names:
+                    new_lines.append(line)
+                else:
+                    removed += 1
+                    continue
+            else:
+                new_lines.append(line)
+        else:
+            new_lines.append(line)
+
+    existing = "\n".join(new_lines)
+
+    # Add missing
     for svc, img in services:
-        if f"| {svc} " not in existing and f"| {svc}\n" not in existing:
+        if f"| {svc} " not in existing and f"| {svc}\n" not in existing and f"| {svc}" not in existing:
             entry = f"{stack_name:<12} | {svc:<35} | {img}"
             if section in existing:
-                lines = existing.split("\n")
-                for i, l in enumerate(lines):
+                lines2 = existing.split("\n")
+                for i, l in enumerate(lines2):
                     if l.startswith(section):
-                        lines.insert(i+1, entry)
+                        lines2.insert(i+1, entry)
                         break
-                existing = "\n".join(lines)
+                existing = "\n".join(lines2)
             else:
                 existing += f"\n{section} ──────────────────────────────────────\n{entry}\n"
             added += 1
-    
-    if added:
-        open(SVC_FILE, "w").write(existing)
+
+    open(SVC_FILE, "w").write(existing)
     return added
 
 def main():
@@ -99,11 +158,13 @@ def main():
         stack_name = os.path.basename(fpath).replace(".yml","")
         services = parse_stack(fpath)
         if not services: continue
-        total_desc += sync_descriptions(stack_name, services, default_desc)
-        total_svc  += sync_all_services(stack_name, services)
-    
+        added_d, removed_d = sync_descriptions(stack_name, services, default_desc)
+        added_s = sync_all_services(stack_name, services)
+        total_desc += added_d + removed_d
+        total_svc  += added_s
+
     if total_desc or total_svc:
-        print(f"Sync: +{total_desc} descriptions, +{total_svc} all_services entries")
+        print(f"Sync complete: descriptions updated, all_services updated")
 
 if __name__ == "__main__":
     main()
