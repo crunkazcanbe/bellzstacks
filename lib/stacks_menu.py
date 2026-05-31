@@ -845,11 +845,13 @@ def run_build_wizard(stdscr, new_stack=False):
             if needs_db == "y":
                 db_type = sel("Database type:", ["postgres","mysql","mariadb","mongo","redis","none"])
                 if db_type is None:
-                    continue
+                    step = max(0, step-1); continue  # ESC = back to previous step
                 if db_type and db_type != "none":
                     db_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
                                        if re.match(r"db_\d+\.yml", f)])
                     db_target = sel("Which DB stack:", db_stacks)
+                    if db_target is None:
+                        continue  # ESC = back to db_type question (re-run db step)
                     if db_target:
                         db_name = inp("DB container name:", f"{state['svc_name']}-{db_type}")
                         if db_name is None: continue
