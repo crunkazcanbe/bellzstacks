@@ -596,12 +596,6 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
             popup.refresh()
         except: pass
 
-            # Footer
-            total = len(get_visible())
-            try: popup.addstr(ph-3, 2, "─"*(pw-4), curses.color_pair(C_DIM))
-            except: pass
-            try: popup.addstr(ph-2, 2, f"◀▶ Registry  ↑↓ Scroll  ENTER Select  ESC Cancel  [{total} results]"[:pw-4], curses.color_pair(C_DIM))
-            except: pass
             popup.refresh()
         except: pass
 
