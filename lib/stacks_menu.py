@@ -405,7 +405,7 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
         return None
 
     reg_names = ["ALL"] + list(REGISTRIES.keys())
-    reg_idx = 0       # current registry tab
+    reg_idx = [0]     # list so nested draw() can modify it
     results = {}      # {reg_name: [result, ...]}
     sel = 0
     scroll = 0
@@ -421,12 +421,12 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
 
     def get_visible():
         """Get results for current registry tab."""
-        if reg_names[reg_idx] == "ALL":
+        if reg_names[reg_idx[0]] == "ALL":
             out = []
             for rlist in results.values():
                 out += [r for r in rlist if "_error" not in r]
             return out
-        return [r for r in results.get(reg_names[reg_idx], []) if "_error" not in r]
+        return [r for r in results.get(reg_names[reg_idx[0]], []) if "_error" not in r]
 
     def draw(loading=False):
         try:
@@ -439,7 +439,7 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
                 short = rname[:10]
                 cnt = len([r for r in results.get(rname,[]) if "_error" not in r]) if rname != "ALL" else sum(len([r for r in v if "_error" not in r]) for v in results.values())
                 label = f" {short}({cnt}) "
-                if i == reg_idx:
+                if i == reg_idx[0]:
                     try: popup.addstr(2, tab_x, label, curses.color_pair(C_SELECTED))
                     except: pass
                 else:
@@ -519,12 +519,10 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
             if sel < len(visible_items)-1: sel += 1
             if sel >= scroll + list_h: scroll = sel - list_h + 1
         elif k == curses.KEY_LEFT:
-            reg_idx_new = (reg_idx - 1) % len(reg_names)
-            reg_idx = reg_idx_new
+            reg_idx[0] = (reg_idx[0] - 1) % len(reg_names)
             sel = 0; scroll = 0
         elif k == curses.KEY_RIGHT:
-            reg_idx_new = (reg_idx + 1) % len(reg_names)
-            reg_idx = reg_idx_new
+            reg_idx[0] = (reg_idx[0] + 1) % len(reg_names)
             sel = 0; scroll = 0
         elif k in (10, 13):
             if visible_items and sel < len(visible_items):
@@ -895,152 +893,6 @@ def _load_registry_searchers():
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.REGISTRIES, mod.search_all
-
-def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
-    """
-    Full curses multi-registry image search.
-    Left/Right = switch registry tab
-    Up/Down    = scroll results
-    Enter      = select image
-    ESC        = cancel
-    Returns selected image string or None.
-    """
-    import concurrent.futures as _cf
-    import time as _t
-
-    try:
-        REGISTRIES, search_all = _load_registry_searchers()
-    except Exception as e:
-        return None
-
-    reg_names = ["ALL"] + list(REGISTRIES.keys())
-    reg_idx = 0       # current registry tab
-    results = {}      # {reg_name: [result, ...]}
-    sel = 0
-    scroll = 0
-    searching = True
-    search_done = False
-
-    h, w = stdscr.getmaxyx()
-    pw = min(w-2, 80); ph = min(h-2, 26)
-    py = (h-ph)//2; px = (w-pw)//2
-    popup = curses.newwin(ph, pw, py, px)
-    popup.keypad(True)
-    popup.nodelay(True)
-
-    def get_visible():
-        """Get results for current registry tab."""
-        if reg_names[reg_idx] == "ALL":
-            out = []
-            for rlist in results.values():
-                out += [r for r in rlist if "_error" not in r]
-            return out
-        return [r for r in results.get(reg_names[reg_idx], []) if "_error" not in r]
-
-    def draw(loading=False):
-        try:
-            popup.clear()
-            draw_border_box(popup, 0, 0, ph, pw, f" Search: {term[:pw-12]} ")
-
-            # Registry tabs - left/right to switch
-            tab_x = 2
-            for i, rname in enumerate(reg_names):
-                short = rname[:10]
-                cnt = len([r for r in results.get(rname,[]) if "_error" not in r]) if rname != "ALL" else sum(len([r for r in v if "_error" not in r]) for v in results.values())
-                label = f" {short}({cnt}) "
-                if i == reg_idx:
-                    try: popup.addstr(2, tab_x, label, curses.color_pair(C_SELECTED))
-                    except: pass
-                else:
-                    try: popup.addstr(2, tab_x, label, curses.color_pair(C_DIM))
-                    except: pass
-                tab_x += len(label) + 1
-                if tab_x > pw-10: break
-
-            popup.addstr(3, 2, "─"*(pw-4), curses.color_pair(C_DIM))
-
-            visible_items = get_visible()
-            list_h = ph - 8
-            items_to_show = visible_items[scroll:scroll+list_h]
-
-            if loading and not visible_items:
-                sp = spinner[frame[0] % len(spinner)]
-                try: popup.addstr(ph//2, pw//2-8, f"{sp} Searching...", curses.color_pair(C_YELLOW))
-                except: pass
-            else:
-                for i, item in enumerate(items_to_show):
-                    y = 4 + i
-                    if y >= ph-4: break
-                    idx = scroll + i
-                    pull = item.get("pull","")
-                    stars = item.get("stars","")
-                    reg = item.get("registry","")
-                    desc = item.get("desc","")[:30]
-                    star_str = f"★{stars}" if stars else ""
-                    line = f"{pull:<40} {star_str:<8} {reg:<20}"[:pw-4]
-                    if idx == sel:
-                        try: popup.addstr(y, 2, line, curses.color_pair(C_SELECTED))
-                        except: pass
-                    else:
-                        try: popup.addstr(y, 2, line, curses.color_pair(C_NORMAL))
-                        except: pass
-
-            # Footer
-            total = len(get_visible())
-            try: popup.addstr(ph-3, 2, "─"*(pw-4), curses.color_pair(C_DIM))
-            except: pass
-            try: popup.addstr(ph-2, 2, f"◀▶ Registry  ↑↓ Scroll  ENTER Select  ESC Cancel  [{total} results]"[:pw-4], curses.color_pair(C_DIM))
-            except: pass
-            popup.refresh()
-        except: pass
-
-    frame = [0]
-    draw(loading=True)
-
-    # Start search in background
-    def do_search():
-        nonlocal search_done
-        all_results = search_all(term, 1, 50)
-        for k, v in all_results.items():
-            results[k] = v
-        search_done = True
-
-    import threading
-    t = threading.Thread(target=do_search, daemon=True)
-    t.start()
-
-    while True:
-        frame[0] += 1
-        draw(loading=not search_done)
-        _t.sleep(0.1)
-
-        k = popup.getch()
-        if k == -1: continue
-        if k == curses.KEY_MOUSE: continue
-
-        visible_items = get_visible()
-        list_h = ph - 8
-
-        if k == curses.KEY_UP:
-            if sel > 0: sel -= 1
-            if sel < scroll: scroll = sel
-        elif k == curses.KEY_DOWN:
-            if sel < len(visible_items)-1: sel += 1
-            if sel >= scroll + list_h: scroll = sel - list_h + 1
-        elif k == curses.KEY_LEFT:
-            reg_idx_new = (reg_idx - 1) % len(reg_names)
-            reg_idx = reg_idx_new
-            sel = 0; scroll = 0
-        elif k == curses.KEY_RIGHT:
-            reg_idx_new = (reg_idx + 1) % len(reg_names)
-            reg_idx = reg_idx_new
-            sel = 0; scroll = 0
-        elif k in (10, 13):
-            if visible_items and sel < len(visible_items):
-                return visible_items[sel].get("pull","")
-            return None
-        elif k == 27:
-            return None
 
 def run_build_wizard(stdscr, new_stack=False):
     """Full curses build wizard - same questions as stacks build."""
