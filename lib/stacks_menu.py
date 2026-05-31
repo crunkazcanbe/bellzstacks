@@ -700,7 +700,6 @@ def _registry_search_inner(stdscr, term, bar_w, pct, title, spinner, frame):
 def run_build_wizard(stdscr, new_stack=False):
     """Full curses build wizard with back navigation."""
     import subprocess as _sp, glob as _gl, time as _t
-    curses.raw()  # pass Ctrl+C through to Python
     h, w = stdscr.getmaxyx()
     pw = min(w-4, 74); ph = 14
     py = (h-ph)//2; px = (w-pw)//2
@@ -1150,8 +1149,6 @@ def run_build_wizard(stdscr, new_stack=False):
     except: pass
     popup.refresh()
     popup.getch()
-    curses.noraw()  # restore
-    curses.cbreak()
 
 def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame):
     """Single line text input inside popup."""
