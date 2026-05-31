@@ -1958,34 +1958,32 @@ def main(stdscr):
                     run_log_popup(stdscr, f'Force gen: {fname}',
                         f'python3 /usr/local/lib/stacks_gen_dynamic.py {stack_name} --force')
         elif tab == 4:  # Art
-            if k in (ord('i'), ord('I')):
-                run_log_popup(stdscr, 'Art inject ALL stacks', f'{STACKS_BIN} art inject all')
-            elif k in (ord('s'), ord('S')):
-                run_log_popup(stdscr, 'Art strip ALL stacks', f'{STACKS_BIN} art strip all')
-            elif k in (ord('d'), ord('D')):
-                run_log_popup(stdscr, 'Art inject ALL dynamics', f'{STACKS_BIN} art dynamic inject all')
-            elif k in (ord('x'), ord('X')):
-                run_log_popup(stdscr, 'Art strip ALL dynamics', f'{STACKS_BIN} art dynamic strip all')
-            elif k in (ord('e'), ord('E')):
-                editor = os.environ.get('EDITOR', 'nano')
-                curses.endwin()
-                os.system(f'{editor} {CONF_DIR}/art.conf')
-                stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
-            elif k in (ord('g'), ord('G')):
-                run_log_popup(stdscr, 'Generate ALL dynamics',
-                    f'python3 /usr/local/lib/stacks_gen_dynamic.py all')
-            elif k in (ord('f'), ord('F')):
-                run_log_popup(stdscr, 'Force regen ALL dynamics',
-                    f'python3 /usr/local/lib/stacks_gen_dynamic.py all --force')
-            elif k in (ord('r'), ord('R')):
-                run_log_popup(stdscr, 'Repair ALL dynamics',
-                    f'python3 /usr/local/lib/stacks_repair_dynamic.py {DYNAMICS_DIR}')
-            elif k in (ord('u'), ord('U')):
-                editor = os.environ.get('EDITOR', 'nano')
-                curses.endwin()
-                os.system(f'{editor} {CONF_DIR}/stack_urls.conf')
-                stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
-        elif tab == 5:  # Backup
+            if k == curses.KEY_UP: sel = max(0, sel-1)
+            elif k == curses.KEY_DOWN: sel = min(len(ART_ITEMS)-1, sel+1)
+            elif k in (10, 13):
+                action = ART_ITEMS[sel][1]
+                if action == 'art_inject_all':
+                    run_log_popup(stdscr, 'Art inject ALL', f'{STACKS_BIN} art inject all')
+                elif action == 'art_strip_all':
+                    run_log_popup(stdscr, 'Art strip ALL', f'{STACKS_BIN} art strip all')
+                elif action == 'art_inject_dyn':
+                    run_log_popup(stdscr, 'Art inject dynamics', f'{STACKS_BIN} art dynamic inject all')
+                elif action == 'art_strip_dyn':
+                    run_log_popup(stdscr, 'Art strip dynamics', f'{STACKS_BIN} art dynamic strip all')
+                elif action == 'edit_art':
+                    curses.endwin()
+                    os.system(f'{os.environ.get("EDITOR","nano")} {CONF_DIR}/art.conf')
+                    stdscr=curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+                elif action == 'edit_urls':
+                    curses.endwin()
+                    os.system(f'{os.environ.get("EDITOR","nano")} {CONF_DIR}/stack_urls.conf')
+                    stdscr=curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+                elif action == 'gen_dyn_all':
+                    run_log_popup(stdscr, 'Gen ALL dynamics', f'python3 /usr/local/lib/stacks_gen_dynamic.py all')
+                elif action == 'gen_dyn_force':
+                    run_log_popup(stdscr, 'Force regen ALL', f'python3 /usr/local/lib/stacks_gen_dynamic.py all --force')
+                elif action == 'repair_dyn':
+                    run_log_popup(stdscr, 'Repair ALL dynamics', f'python3 /usr/local/lib/stacks_repair_dynamic.py {DYNAMICS_DIR}')
             if k == curses.KEY_UP: sel = max(0, sel-1)
             elif k == curses.KEY_DOWN: sel = min(len(BACKUP_ITEMS)-1, sel+1)
             elif k in (10, 13):
