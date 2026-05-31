@@ -649,6 +649,20 @@ networks:
     if not svc_name: svc_name = img_base
     pct[0] = 25
 
+
+    # Step 4: IP and port
+    try:
+        used = set()
+        for f in __import__("glob").glob(f"{STACKS_DIR}/*.yml"):
+            for m in re.findall(r"192\.168\.1\.(\d+)", open(f).read()):
+                used.add(int(m))
+        next_ip_val = "192.168.1." + str(next(x for x in range(200,254) if x not in used))
+    except: next_ip_val = "192.168.1.200"
+
+    svc_ip   = inp("Service IP (192.168.1.x):", next_ip_val)
+    svc_port = inp("Service port:", "8080")
+    container_name = svc_name
+
     pct[0] = 40
 
     # Step 5: Database
@@ -693,6 +707,7 @@ networks:
 
     # Step 8: Build scaffold
     status("Building compose scaffold...", 80)
+    container_name = svc_name
     net_name = container_name.replace("-","_") + "_net"
 
     block = "\n".join([
