@@ -628,8 +628,10 @@ networks:
         target_stack = stack_name
         stacks.append(stack_name)
     else:
-        target_stack = sel("Select target stack:", stacks)
-        if not target_stack: return
+        target_stack_display = sel("Select target stack:", stacks)
+        if not target_stack_display: return
+        # Extract just the name - strip service count display
+        target_stack = target_stack_display.split()[0].strip()
 
     # Step 2: Image search FIRST
     search_term = inp("Search image (or type full image:tag to skip):", "")
