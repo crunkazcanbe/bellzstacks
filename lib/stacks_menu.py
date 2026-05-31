@@ -237,6 +237,17 @@ def run_log_popup(stdscr, title, cmd):
     proc.wait(); popup.nodelay(False)
     pct=100; draw(done=True); popup.getch()
 
+def clean_log_line(raw):
+    """Strip ANSI and noise from a log line."""
+    import re as _re
+    line = _re.sub(r'\x1b[^a-zA-Z]*[a-zA-Z]', '', raw)
+    line = _re.sub(r'[\x00-\x1f\x7f]', '', line).strip()
+    if not line or len(line) < 3: return ''
+    if _re.search(r'[░█]{2,}|Press Ctrl|===|____|\\___|/ ___', line): return ''
+    if _re.match(r'^[\s_/\\|.=\[\](){}#*\-]+$', line): return ''
+    if _re.match(r'^[\[\]#>\-\s\d%]+$', line): return ''
+    return line
+
 def run_sequence_popup(stdscr, title, steps):
     import time as _t
     h,w=stdscr.getmaxyx()
