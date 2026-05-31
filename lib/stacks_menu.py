@@ -202,120 +202,149 @@ def run_popup_action(stdscr, title, actions):
 
 # ── Log popup (shows command output line by line) ────────────────────────────
 def run_log_popup(stdscr, title, cmd):
-    """Run a command with a loading bar popup - shows one log line above bar."""
+    import time as _t
     h, w = stdscr.getmaxyx()
-    pw = min(w - 6, 72)
-    ph = 9  # fixed height: border+title, blank, log line, blank, bar, status, blank, hint, border
-    py = (h - ph) // 2
-    px = (w - pw) // 2
-
-    popup = curses.newwin(ph, pw, py, px)
-    popup.keypad(True)
-
-    bar_w = pw - 8
-    last_line = ""
-    frame = 0
-    spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    pct = 0
-
+    pw = min(w-6,70); ph=7; py=(h-ph)//2; px=(w-pw)//2
+    popup = curses.newwin(ph,pw,py,px)
+    popup.nodelay(True)
+    bar_w=pw-6; pct=0; frame=0
+    spinner="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     def draw(done=False):
         try:
             popup.clear()
-            draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-6]} ")
-            # Log line
-            log_display = last_line[:pw-4] if last_line else "Starting..."
-            popup.addstr(2, 3, log_display[:pw-6], curses.color_pair(C_DIM))
-            # Loading bar
-            filled = int(bar_w * pct / 100)
-            bar = "█" * filled + "░" * (bar_w - filled)
-            try:
-                popup.addstr(4, 3, f"[{bar}]", curses.color_pair(C_CYAN))
+            draw_border_box(popup,0,0,ph,pw,f" {title[:pw-4]} ")
+            filled=int(bar_w*pct/100)
+            bar="█"*filled+"░"*(bar_w-filled)
+            try: popup.addstr(2,3,f"[{bar}]",curses.color_pair(C_CYAN))
             except: pass
-            # Status line
             if done:
-                popup.addstr(5, 3, f"✔ Complete", curses.color_pair(C_GREEN))
-                popup.addstr(7, 3, "Press any key", curses.color_pair(C_DIM))
+                try: popup.addstr(3,3,"✔ Done — press any key",curses.color_pair(C_GREEN))
+                except: pass
             else:
-                sp = spinner[frame % len(spinner)]
-                popup.addstr(5, 3, f"{sp} Running...  {pct}%", curses.color_pair(C_YELLOW))
+                sp=spinner[frame%len(spinner)]
+                try: popup.addstr(3,3,f"{sp} {title}... {pct}%",curses.color_pair(C_YELLOW))
+                except: pass
             popup.refresh()
         except: pass
+    stdscr.clear(); stdscr.refresh(); draw()
+    proc=subprocess.Popen(cmd,shell=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    try:
+        while proc.poll() is None:
+            pct=min(95,pct+2); frame+=1; draw(); _t.sleep(0.1)
+            k=popup.getch()
+            if k in (27,ord("q"),ord("Q")): proc.terminate(); break
+    except KeyboardInterrupt: proc.terminate()
+    proc.wait(); popup.nodelay(False)
+    pct=100; draw(done=True); popup.getch()
 
-    draw()
+def run_sequence_popup(stdscr, title, steps):
+    import time as _t
+    h,w=stdscr.getmaxyx()
+    pw=min(w-6,70); ph=9; py=(h-ph)//2; px=(w-pw)//2
+    popup=curses.newwin(ph,pw,py,px)
+    popup.nodelay(True)
+    bar_w=pw-6; frame=0; total=len(steps)
+    spinner="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    last_log=[""]
+    def draw(idx,slabel,done=False):
+        try:
+            popup.clear()
+            draw_border_box(popup,0,0,ph,pw,f" {title[:pw-4]} ")
+            pct=100 if done else int((idx/total)*100)
+            filled=int(bar_w*pct/100)
+            bar="█"*filled+"░"*(bar_w-filled)
+            # Log line - clean text only
+            log=last_log[0][:pw-6]
+            try: popup.addstr(2,3,log,curses.color_pair(C_DIM))
+            except: pass
+            try: popup.addstr(3,2,f"[{bar}]",curses.color_pair(C_CYAN))
+            except: pass
+            if done:
+                try: popup.addstr(4,3,"✔ All done — press any key",curses.color_pair(C_GREEN))
+                except: pass
+                try: popup.addstr(5,3,f"Step {total}/{total} complete",curses.color_pair(C_DIM))
+                except: pass
+            else:
+                try: popup.addstr(4,3,f"{slabel}  {pct}%",curses.color_pair(C_YELLOW))
+                except: pass
+                try: popup.addstr(5,3,f"Step {idx+1}/{total}",curses.color_pair(C_DIM))
+                except: pass
+            popup.refresh()
+        except: pass
+    stdscr.clear(); stdscr.refresh()
+    cancelled=False
+    bad=re.compile(r"[\x1b\x00-\x1f\x7f]|[░█]{2,}|Press Ctrl|Pulling|Download|Extract|===")
+    for i,(slabel,cmd) in enumerate(steps):
+        draw(i,slabel)
+        proc=subprocess.Popen(cmd,shell=True,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1)
+        try:
+            for raw in proc.stdout:
+                line=re.sub(r"\x1b[^a-zA-Z]*[a-zA-Z]","",raw)
+                line=re.sub(r"[\x00-\x1f\x7f]","",line).strip()
+                # Skip stacks art, loading bar chars, short noise
+                if (line and not bad.search(line)
+                    and not re.match(r"^[\[\]#>░█=\-\|\s\d%\_/\\]+$",line)
+                    and not re.match(r"^[\s_/\\|]{3,}",line)
+                    and len(line) > 4
+                    and not all(c in " _/\\|.-=[](){}#*" for c in line)):
+                    last_log[0]=line
+                frame+=1; draw(i,slabel)
+                _t.sleep(0.05)
+                k=popup.getch()
+                if k in (27,ord("q"),ord("Q")): proc.terminate(); cancelled=True; break
+            if cancelled: break
+        except KeyboardInterrupt: proc.terminate(); cancelled=True
+        proc.wait()
+        if cancelled: break
+    if not cancelled:
+        draw(total,"",done=True); popup.nodelay(False); popup.getch()
 
-    proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
-                           stderr=subprocess.STDOUT, text=True)
+def run_cmd_silent(stdscr, title, cmd):
+    run_log_popup(stdscr, title, cmd)
 
-    lines_seen = 0
-    for line in proc.stdout:
-        line = line.rstrip()
-        # Strip ANSI escape codes
-        line = re.sub(r'\[[0-9;]*[mGKHF]', '', line)
-        if line.strip():
-            last_line = line.strip()
-            lines_seen += 1
-            pct = min(95, lines_seen * 2)
-            frame += 1
-            draw()
-    proc.wait()
-
-    pct = 100
-    draw(done=True)
-    popup.getch()
-
-# ── Stack actions ────────────────────────────────────────────────────────────
 GLOBAL_ACTIONS = [
-    ("▶  Up ALL stacks",                 "up_all"),
-    ("■  Down ALL stacks",               "down_all"),
-    ("↺  Restart ALL stacks",            "restart_all"),
-    ("⟳  Recreate ALL stacks",           "recreate_all"),
-    ("✦  Fix ALL stacks",                "fix_all"),
-    ("★  Full Repair ALL (fix+repair+recreate+up)", "full_repair_all"),
-    ("↑  Scale ON all",                  "scale_on_all"),
-    ("↓  Scale OFF all",                 "scale_off_all"),
-    ("↑  Proxy ON all",                  "proxy_on_all"),
-    ("↓  Proxy OFF all",                 "proxy_off_all"),
-    ("✕  Cancel",                        None),
+    ("▶  Up ALL stacks",                      "up_all"),
+    ("■  Down ALL stacks",                    "down_all"),
+    ("↺  Restart ALL stacks",                 "restart_all"),
+    ("⟳  Recreate ALL stacks",                "recreate_all"),
+    ("✦  Fix ALL stacks",                     "fix_all"),
+    ("◈  Repair + Recreate + Up ALL",         "repair_recreate_up_all"),
+    ("◉  Full: Repair+Fix+Recreate+Up ALL",   "full_repair_all"),
+    ("↑  Scale ON all",                       "scale_on_all"),
+    ("↓  Scale OFF all",                      "scale_off_all"),
+    ("↑  Proxy ON all",                       "proxy_on_all"),
+    ("↓  Proxy OFF all",                      "proxy_off_all"),
+    ("✕  Cancel",                             None),
 ]
 
 STACK_ACTIONS = [
-    ("▶  Start",                    "up"),
-    ("■  Stop",                     "down"),
-    ("↺  Restart",                  "restart"),
-    ("⟳  Recreate",                 "recreate"),
-    ("✦  Fix",                      "fix"),
-    ("✦  Repair",                   "repair"),
-    ("⟳  Recreate + Up",             "recreate_up"),
-    ("★  Fix + Repair + Recreate + Up",  "full_repair"),
-    ("◈  Recreate + Repair + Up",    "recreate_repair"),
-    ("◉  Repair + Recreate + Fix + Up",  "deep_repair"),
-    ("↑  Scale ON",                 "scale_on"),
-    ("↓  Scale OFF",                "scale_off"),
-    ("↑  Proxy ON",                 "proxy_on"),
-    ("↓  Proxy OFF",                "proxy_off"),
-    ("✕  Cancel",                   None),
+    ("▶  Start",                              "up"),
+    ("■  Stop",                               "down"),
+    ("↺  Restart",                            "restart"),
+    ("⟳  Recreate",                           "recreate"),
+    ("✦  Fix",                                "fix"),
+    ("✦  Repair",                             "repair"),
+    ("⟳  Recreate + Up",                      "recreate_up"),
+    ("◈  Repair + Recreate + Up",             "recreate_repair"),
+    ("★  Fix + Repair + Recreate + Up",       "full_repair"),
+    ("◉  Repair + Fix + Recreate + Up",       "deep_repair"),
+    ("↑  Scale ON",                           "scale_on"),
+    ("↓  Scale OFF",                          "scale_off"),
+    ("↑  Proxy ON",                           "proxy_on"),
+    ("↓  Proxy OFF",                          "proxy_off"),
+    ("✕  Cancel",                             None),
 ]
 
 CONTAINER_ACTIONS = [
-    ("▶  Start",       "start"),
-    ("■  Stop",        "stop"),
-    ("↺  Restart",     "restart"),
-    ("⟳  Recreate",    "recreate"),
-    ("↑  Scale ON",    "scale_on"),
-    ("↓  Scale OFF",   "scale_off"),
-    ("↑  Proxy ON",    "proxy_on"),
-    ("↓  Proxy OFF",   "proxy_off"),
-    ("✕  Cancel",      None),
-]
-
-CONFIG_FILES = [
-    ("stacks.conf",       "stacks.conf"),
-    ("global_inject.conf","global_inject.conf"),
-    ("menu.conf",    "menu.conf"),
-    ("stack_urls.conf",   "stack_urls.conf"),
-    ("backup.conf",       "backup.conf"),
-    ("build.conf",        "build.conf"),
-    ("art.conf",     "art.conf"),
+    ("▶  Start",                              "start"),
+    ("■  Stop",                               "stop"),
+    ("↺  Restart",                            "restart"),
+    ("⟳  Recreate",                           "recreate"),
+    ("↑  Scale ON",                           "scale_on"),
+    ("↓  Scale OFF",                          "scale_off"),
+    ("↑  Proxy ON",                           "proxy_on"),
+    ("↓  Proxy OFF",                          "proxy_off"),
+    ("✕  Cancel",                             None),
 ]
 
 def do_global_action(stdscr, action):
@@ -330,6 +359,12 @@ def do_global_action(stdscr, action):
         run_log_popup(stdscr, 'Recreate ALL', f'{STACKS_BIN} up recreate')
     elif action == 'fix_all':
         run_log_popup(stdscr, 'Fix ALL', f'{STACKS_BIN} fix all')
+    elif action == 'repair_recreate_up_all':
+        run_sequence_popup(stdscr, 'Repair+Recreate+Up ALL', [
+            ('Repair',   f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}'),
+            ('Recreate', f'{STACKS_BIN} up recreate'),
+            ('Up',       f'{STACKS_BIN} up'),
+        ])
     elif action == 'full_repair_all':
         run_cmd_silent(stdscr, 'Repair ALL', f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}')
         run_cmd_silent(stdscr, 'Fix ALL', f'{STACKS_BIN} fix all')
