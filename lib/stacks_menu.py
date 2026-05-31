@@ -285,14 +285,34 @@ def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
         try: popup.addstr(7, 3, "> ", curses.color_pair(C_NORMAL))
         except: pass
         popup.refresh()
-        curses.echo()
         curses.curs_set(1)
-        val = popup.getstr(7, 5, pw-8).decode("utf-8", "ignore").strip()
-        curses.noecho()
+        # Manual input loop - ignores resize/mouse events
+        val = []
+        popup.nodelay(False)
+        popup.timeout(-1)
+        while True:
+            ch = popup.getch()
+            if ch == curses.KEY_RESIZE: continue  # ignore keyboard popup
+            if ch == curses.KEY_MOUSE: continue
+            if ch in (10, 13):  # Enter
+                break
+            elif ch == 27:  # ESC
+                val = []
+                break
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if val: val.pop()
+            elif 32 <= ch <= 126:
+                val.append(chr(ch))
+            # Redraw input line
+            try:
+                popup.addstr(7, 3, "> " + "".join(val) + " " * (pw-12), curses.color_pair(C_NORMAL))
+                popup.move(7, 5 + len(val))
+            except: pass
+            popup.refresh()
         curses.curs_set(0)
-        return val if val else default
+        result = "".join(val).strip()
+        return result if result else default
     except:
-        curses.noecho()
         curses.curs_set(0)
         return default
 
@@ -774,14 +794,34 @@ def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
         try: popup.addstr(7, 3, "> ", curses.color_pair(C_NORMAL))
         except: pass
         popup.refresh()
-        curses.echo()
         curses.curs_set(1)
-        val = popup.getstr(7, 5, pw-8).decode("utf-8", "ignore").strip()
-        curses.noecho()
+        # Manual input loop - ignores resize/mouse events
+        val = []
+        popup.nodelay(False)
+        popup.timeout(-1)
+        while True:
+            ch = popup.getch()
+            if ch == curses.KEY_RESIZE: continue  # ignore keyboard popup
+            if ch == curses.KEY_MOUSE: continue
+            if ch in (10, 13):  # Enter
+                break
+            elif ch == 27:  # ESC
+                val = []
+                break
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if val: val.pop()
+            elif 32 <= ch <= 126:
+                val.append(chr(ch))
+            # Redraw input line
+            try:
+                popup.addstr(7, 3, "> " + "".join(val) + " " * (pw-12), curses.color_pair(C_NORMAL))
+                popup.move(7, 5 + len(val))
+            except: pass
+            popup.refresh()
         curses.curs_set(0)
-        return val if val else default
+        result = "".join(val).strip()
+        return result if result else default
     except:
-        curses.noecho()
         curses.curs_set(0)
         return default
 
