@@ -880,6 +880,17 @@ networks:
     do_deploy = cfg.get("deploy_limits",True)
     do_logging = cfg.get("logging",True)
     sab_group = cfg.get("sablier_group","") or "srvs"
+    sab_enable = cfg.get("sablier_enable",True)
+    log_driver = cfg.get("log_driver","json-file")
+    log_max_size = cfg.get("log_max_size","10m")
+    log_max_file = cfg.get("log_max_file","3")
+    blkio_read = cfg.get("blkio_read_rate","500mb")
+    blkio_write = cfg.get("blkio_write_rate","500mb")
+    storage_size = cfg.get("storage_opt_size","10G")
+    mem_limit = cfg.get("deploy_memory_limit","1G")
+    cpu_limit = cfg.get("deploy_cpu_limit","0.2")
+    pids_limit = cfg.get("deploy_pids_limit",1000)
+    mem_res = cfg.get("deploy_memory_reservation","100M")
     domain = "example.com"
     bl = []
     bl.append(f"  # ---------------------------------------------------------")
@@ -901,14 +912,14 @@ networks:
     bl.append(f"    stop_signal: {stop_signal}")
     bl.append(f"    privileged: {privileged}")
     bl.append(f'    user: "{user}"')
-    if do_blkio: bl.append("    blkio_config: {weight: 500, device_read_bps: [{path: /dev/nvme0n1, rate: 500mb}], device_write_bps: [{path: /dev/nvme0n1, rate: 500mb}]}")
+    if do_blkio: bl.append(f"    blkio_config: {{weight: 500, device_read_bps: [{{path: /dev/nvme0n1, rate: {blkio_read}}}], device_write_bps: [{{path: /dev/nvme0n1, rate: {blkio_write}}}]}}")
     if do_ulimits: bl.append("    ulimits: {memlock: {soft: -1, hard: -1}, nofile: {soft: 65535, hard: 65535}, nproc: 65535}")
-    if do_deploy: bl.append("    deploy: {placement: {constraints: [node.labels.priority == high]}, resources: {limits: {memory: 1G, cpus: '0.2', pids: 1000}, reservations: {memory: 100M, cpus: '0.05'}}}")
-    bl.append("    storage_opt: {size: 10G}")
+    if do_deploy: bl.append(f"    deploy: {{placement: {{constraints: [node.labels.priority == high]}}, resources: {{limits: {{memory: {mem_limit}, cpus: '{cpu_limit}', pids: {pids_limit}}}, reservations: {{memory: {mem_res}, cpus: '0.05'}}}}}}")
+    bl.append(f"    storage_opt: {{size: {storage_size}}}")
     if do_logging:
         bl.append("    logging:")
-        bl.append("      driver: json-file")
-        bl.append("      options: {max-size: 10m, max-file: '3'}")
+        bl.append(f"      driver: {log_driver}")
+        bl.append(f"      options: {{max-size: {log_max_size}, max-file: '{log_max_file}'}}")
     bl.append("    dns:")
     for d in dns_list: bl.append(f"      - {d}")
     if extra_env:
@@ -926,7 +937,7 @@ networks:
     bl.append('      - "traefik.enable=true"')
     bl.append(f'      - "traefik.http.routers.{svc_name}.rule=Host(`{svc_name}.{domain}`)"')
     bl.append(f'      - "traefik.http.services.{svc_name}.loadbalancer.server.port={svc_port}"')
-    bl.append('      - "sablier.enable=true"')
+    if sab_enable: bl.append('      - "sablier.enable=true"')
     bl.append(f'      - "sablier.group={sab_group}"')
     for el in extra_labels: bl.append(f'      - "{el}"')
     bl.append("")
@@ -1407,7 +1418,50 @@ def do_stack_action(stdscr, stack_name, action):
     else: return
     run_log_popup(stdscr, f'{action} → {stack_name}', cmd)
 
+def _show_container_inspect(stdscr, name):
+    """Show container inspect info in a scrollable popup."""
+    try:
+        r = subprocess.run(['docker','inspect','--format',
+            '''ID: {{.Id[:12]}}
+Image: {{.Config.Image}}
+Status: {{.State.Status}}
+Started: {{.State.StartedAt}}
+IP: {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}
+Ports: {{range $p,$b := .NetworkSettings.Ports}}{{$p}} {{end}}
+CPU: {{.HostConfig.CpusetCpus}}
+Memory: {{.HostConfig.Memory}}
+Restart: {{.HostConfig.RestartPolicy.Name}}
+Mounts: {{len .Mounts}} volumes''',
+            name], capture_output=True, text=True, timeout=5)
+        info = r.stdout.strip() if r.returncode==0 else r.stderr.strip()
+    except Exception as e:
+        info = str(e)
+    h, w = stdscr.getmaxyx()
+    pw = min(w-4, 70); ph = min(h-4, 18)
+    py = (h-ph)//2; px = (w-pw)//2
+    popup = curses.newwin(ph, pw, py, px)
+    popup.keypad(True)
+    popup.nodelay(False)
+    stdscr.clear(); stdscr.refresh()
+    lines = info.split("\n")
+    scroll = 0
+    while True:
+        popup.clear()
+        draw_border_box(popup, 0, 0, ph, pw, f" Inspect: {name[:pw-12]} ")
+        visible = ph - 4
+        for i, l in enumerate(lines[scroll:scroll+visible]):
+            try: popup.addstr(2+i, 2, l[:pw-4], curses.color_pair(C_NORMAL))
+            except: pass
+        try: popup.addstr(ph-2, 2, "↑↓ Scroll  ESC Close"[:pw-4], curses.color_pair(C_DIM))
+        except: pass
+        popup.refresh()
+        k = popup.getch()
+        if k == curses.KEY_UP: scroll = max(0, scroll-1)
+        elif k == curses.KEY_DOWN: scroll = min(max(0,len(lines)-visible), scroll+1)
+        elif k in (27, ord('q')): break
+
 def do_container_action(stdscr, container_name, stack_file, action):
+
     if action is None: return
     stack_name = os.path.basename(stack_file).replace('.yml','') if stack_file else ''
     if action == 'start':
@@ -1437,6 +1491,9 @@ def do_container_action(stdscr, container_name, stack_file, action):
         if stack_name:
             cmd = f'{STACKS_BIN} proxy {stack_name} {container_name} off'
         else: return
+    elif action == 'inspect':
+        _show_container_inspect(stdscr, container_name)
+        return
     else: return
     run_log_popup(stdscr, f'{action} → {container_name}', cmd)
 
