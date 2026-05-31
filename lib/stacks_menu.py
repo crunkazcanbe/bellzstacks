@@ -697,6 +697,11 @@ def run_build_wizard(stdscr, new_stack=False):
     frame = [0]
     pct = [0]
     title = "Build New Service"
+    def update_title():
+        nonlocal title
+        titles = ["Stack","Image","Name","IP/Port","Database","Redis","Companion","Start"]
+        t = titles[min(step, len(titles)-1)] if step < len(titles) else "Build"
+        title = f"Build [{step+1}/8] {t}"
     stdscr.refresh()
 
     def status(msg, p):
@@ -741,6 +746,7 @@ def run_build_wizard(stdscr, new_stack=False):
 
     while True:
         current = STEPS[step] if step < len(STEPS) else "done"
+        update_title()
 
         curses.flushinp()  # flush buffered keys between steps
         if current == "stack":
