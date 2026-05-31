@@ -1650,42 +1650,57 @@ def draw_dynamics_tab(win, h, w, sel):
         return files
     except: return []
 
-def draw_art_tab(win, h, w):
+ART_ITEMS = [
+    ("Inject art into ALL stacks",           "art_inject_all"),
+    ("Strip art from ALL stacks",            "art_strip_all"),
+    ("Inject art into ALL dynamics",         "art_inject_dyn"),
+    ("Strip art from ALL dynamics",          "art_strip_dyn"),
+    ("Edit art.conf",                   "edit_art"),
+    ("Edit stack_urls.conf",                 "edit_urls"),
+    ("Generate dynamics from ALL stacks",    "gen_dyn_all"),
+    ("Force regenerate ALL dynamics",        "gen_dyn_force"),
+    ("Repair ALL dynamic configs",           "repair_dyn"),
+]
+
+def draw_art_tab(win, h, w, sel=0):
     try:
-        win.addstr(3, 2, "ART INJECTION", curses.color_pair(C_ACCENT))
+        win.addstr(3, 2, "ART & DYNAMICS", curses.color_pair(C_ACCENT))
         win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
-        actions = [
-            ("I", "Inject art into ALL stacks"),
-            ("S", "Strip art from ALL stacks"),
-            ("D", "Inject art into ALL dynamics"),
-            ("X", "Strip art from ALL dynamics"),
-            ("E", "Edit art.conf (art config)"),
-            ("G", "Generate dynamics from ALL stacks"),
-            ("F", "Force regenerate ALL (overwrite)"),
-            ("R", "Repair ALL dynamic configs"),
-            ("U", "Edit stack_urls.conf (URLs config)"),
-        ]
-        for i, (key, desc) in enumerate(actions):
-            try:
-                win.addstr(6+i, 4, f"[{key}]", curses.color_pair(C_ACCENT))
-                win.addstr(6+i, 9, desc, curses.color_pair(C_NORMAL))
-            except: pass
     except: pass
+    for i, (label, _) in enumerate(ART_ITEMS):
+        y = 5 + i
+        if y >= h-2: break
+        if i == sel:
+            try: win.addstr(y, 2, f"  ▶  {label:<55}", curses.color_pair(C_SELECTED))
+            except: pass
+        else:
+            try: win.addstr(y, 2, f"     {label:<55}", curses.color_pair(C_NORMAL))
+            except: pass
 
-def draw_backup_tab(win, h, w):
+BACKUP_ITEMS = [
+    ("Run full backup now",                  "backup_full"),
+    ("Run pre-backup snapshot",              "backup_pre"),
+    ("View backup log",                      "backup_log"),
+    ("View stacks up log",                   "view_up_log"),
+    ("View stacks fix log",                  "view_fix_log"),
+    ("View stacks build log",                "view_build_log"),
+    ("Restore from backup",                  "backup_restore"),
+]
 
-
-    win.addstr(3, 2, 'BACKUP', curses.color_pair(C_ACCENT))
-    win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
-    actions = [
-        ('B', 'Run full backup now'),
-        ('P', 'Run pre-backup snapshot'),
-        ('L', 'View backup log'),
-        ('R', 'Restore from backup'),
-    ]
-    for i, (key, desc) in enumerate(actions):
-        win.addstr(6+i, 4, f'[{key}]', curses.color_pair(C_ACCENT))
-        win.addstr(6+i, 9, desc, curses.color_pair(C_NORMAL))
+def draw_backup_tab(win, h, w, sel=0):
+    try:
+        win.addstr(3, 2, "BACKUP & LOGS", curses.color_pair(C_ACCENT))
+        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+    except: pass
+    for i, (label, _) in enumerate(BACKUP_ITEMS):
+        y = 5 + i
+        if y >= h-2: break
+        if i == sel:
+            try: win.addstr(y, 2, f"  ▶  {label:<55}", curses.color_pair(C_SELECTED))
+            except: pass
+        else:
+            try: win.addstr(y, 2, f"     {label:<55}", curses.color_pair(C_NORMAL))
+            except: pass
 
 BUILD_ITEMS = [
     ('Build new service (wizard)',           'build_new'),
@@ -1806,9 +1821,9 @@ def main(stdscr):
         elif tab == 3:
             dyn_files = draw_dynamics_tab(stdscr, h, w, sel)
         elif tab == 4:
-            draw_art_tab(stdscr, h, w)
+            draw_art_tab(stdscr, h, w, sel)
         elif tab == 5:
-            draw_backup_tab(stdscr, h, w)
+            draw_backup_tab(stdscr, h, w, sel)
         elif tab == 6:
             draw_build_tab(stdscr, h, w, sel)
         elif tab == 7:
@@ -1886,8 +1901,9 @@ def main(stdscr):
             _log_dir = '/srv/stacks'
             _log_files = sorted(_glob.glob(f'{_log_dir}/stacks_*.log'))
     # Add build log if it exists
-    _build_log = f'{_log_dir}/stacks_build.log'
-    if os.path.exists(_build_log) and _build_log not in _log_files: _log_files.insert(0, _build_log)
+            # Add build log if it exists
+            _build_log = f'{_log_dir}/stacks_build.log'
+            if os.path.exists(_build_log) and _build_log not in _log_files: _log_files.insert(0, _build_log)
             log_sources = [(f.split('/')[-1], f'cat {f}') for f in _log_files]
             if not log_sources:
                 log_sources = [('No logs found', 'echo No stacks logs found')]
@@ -1970,12 +1986,32 @@ def main(stdscr):
                 os.system(f'{editor} {CONF_DIR}/stack_urls.conf')
                 stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
         elif tab == 5:  # Backup
-            if k == ord('b') or k == ord('B'):
-                run_log_popup(stdscr, 'Backup', f'{STACKS_BIN} backup')
-            elif k == ord('p') or k == ord('P'):
-                run_log_popup(stdscr, 'Pre-backup', f'{STACKS_BIN} backup pre')
-            elif k == ord('l') or k == ord('L'):
-                run_log_popup(stdscr, 'Backup Log', 'cat /tmp/stacks_backup.log 2>/dev/null || echo "No log found"')
+            if k == curses.KEY_UP: sel = max(0, sel-1)
+            elif k == curses.KEY_DOWN: sel = min(len(BACKUP_ITEMS)-1, sel+1)
+            elif k in (10, 13):
+                action = BACKUP_ITEMS[sel][1]
+                if action == 'backup_full':
+                    run_log_popup(stdscr, 'Full Backup', f'{STACKS_BIN} backup')
+                elif action == 'backup_pre':
+                    run_log_popup(stdscr, 'Pre-backup', f'{STACKS_BIN} backup pre')
+                elif action == 'backup_log':
+                    curses.endwin()
+                    os.system(f'{os.environ.get("EDITOR","nano")} /tmp/stacks_backup.log 2>/dev/null || echo No log')
+                    stdscr=curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+                elif action == 'view_up_log':
+                    curses.endwin()
+                    os.system(f'{os.environ.get("EDITOR","nano")} {STACKS_DIR}/../stacks_up.log')
+                    stdscr=curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+                elif action == 'view_fix_log':
+                    curses.endwin()
+                    os.system(f'{os.environ.get("EDITOR","nano")} {STACKS_DIR}/../stacks_fix.log')
+                    stdscr=curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+                elif action == 'view_build_log':
+                    curses.endwin()
+                    os.system(f'{os.environ.get("EDITOR","nano")} {STACKS_DIR}/../stacks_build.log')
+                    stdscr=curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+                elif action == 'backup_restore':
+                    run_log_popup(stdscr, 'Restore', f'{STACKS_BIN} backup restore')
 
         elif tab == 6:  # Build
             if k == curses.KEY_UP: sel = max(0, sel-1)
