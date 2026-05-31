@@ -118,11 +118,13 @@ def refresh_data():
 
 # ── Drawing helpers ──────────────────────────────────────────────────────────
 def draw_header(win, title, w):
-    win.attron(curses.color_pair(C_HEADER))
-    win.addstr(0, 0, ' ' * w)
-    x = (w - len(title)) // 2
-    win.addstr(0, max(0,x), title[:w])
-    win.attroff(curses.color_pair(C_HEADER))
+    try:
+        win.attron(curses.color_pair(C_HEADER))
+        win.addstr(0, 0, ' ' * (w-1))
+        x = (w - len(title)) // 2
+        win.addstr(0, max(0,x), title[:w-1])
+        win.attroff(curses.color_pair(C_HEADER))
+    except: pass
 
 def draw_tabs(win, y, w, tabs, active):
     win.addstr(y, 0, ' ' * w, curses.color_pair(C_DIM))
@@ -137,22 +139,30 @@ def draw_tabs(win, y, w, tabs, active):
 
 def draw_footer(win, h, w, hints):
     msg = '  '.join(hints)
-    win.attron(curses.color_pair(C_DIM))
-    win.addstr(h-1, 0, ' ' * w)
-    win.addstr(h-1, 2, msg[:w-4])
-    win.attroff(curses.color_pair(C_DIM))
+    try:
+        win.attron(curses.color_pair(C_DIM))
+        win.addstr(h-1, 0, (' ' * (w-1)))
+        win.addstr(h-1, 2, msg[:w-4])
+        win.attroff(curses.color_pair(C_DIM))
+    except: pass
 
 def draw_border_box(win, y, x, h, w, title=''):
-    win.attron(curses.color_pair(C_POPUP_BDR))
-    win.addstr(y,   x, '╔' + '═'*(w-2) + '╗')
-    win.addstr(y+h-1, x, '╚' + '═'*(w-2) + '╝')
-    for i in range(1, h-1):
-        win.addstr(y+i, x,   '║')
-        win.addstr(y+i, x+w-1, '║')
-    if title:
-        t = f' {title} '
-        win.addstr(y, x + (w-len(t))//2, t)
-    win.attroff(curses.color_pair(C_POPUP_BDR))
+    try:
+        win.attron(curses.color_pair(C_POPUP_BDR))
+        win.addstr(y, x, '╔' + '═'*(w-2) + '╗')
+        for i in range(1, h-1):
+            win.addstr(y+i, x, '║')
+            win.addstr(y+i, x+w-1, '║')
+        try:
+            win.addstr(y+h-1, x, '╚' + '═'*(w-2) + '╝')
+        except: pass
+        if title:
+            t = f' {title} '
+            try:
+                win.addstr(y, x + (w-len(t))//2, t)
+            except: pass
+        win.attroff(curses.color_pair(C_POPUP_BDR))
+    except: pass
 
 # ── Popup action menu ────────────────────────────────────────────────────────
 def run_popup_action(stdscr, title, actions):
@@ -172,10 +182,12 @@ def run_popup_action(stdscr, title, actions):
         draw_border_box(popup, 0, 0, ph, pw, title[:pw-4])
         for i, (label, _) in enumerate(actions):
             y = i + 2
-            if i == sel:
-                popup.addstr(y, 2, f'  {label:<{pw-6}}  ', curses.color_pair(C_POPUP_SEL))
-            else:
-                popup.addstr(y, 2, f'  {label:<{pw-6}}  ', curses.color_pair(C_NORMAL))
+            try:
+                if i == sel:
+                    popup.addstr(y, 2, f'  {label:<{pw-6}}', curses.color_pair(C_POPUP_SEL))
+                else:
+                    popup.addstr(y, 2, f'  {label:<{pw-6}}', curses.color_pair(C_NORMAL))
+            except: pass
         popup.refresh()
 
         k = popup.getch()
@@ -190,59 +202,98 @@ def run_popup_action(stdscr, title, actions):
 
 # ── Log popup (shows command output line by line) ────────────────────────────
 def run_log_popup(stdscr, title, cmd):
-    """Run a command and show output in a popup, one line at a time."""
+    """Run a command with a loading bar popup - shows one log line above bar."""
     h, w = stdscr.getmaxyx()
-    pw = min(w - 4, 80)
-    ph = min(h - 4, 20)
+    pw = min(w - 6, 72)
+    ph = 9  # fixed height: border+title, blank, log line, blank, bar, status, blank, hint, border
     py = (h - ph) // 2
     px = (w - pw) // 2
 
     popup = curses.newwin(ph, pw, py, px)
     popup.keypad(True)
-    draw_border_box(popup, 0, 0, ph, pw, title[:pw-4])
-    popup.addstr(ph-1, 2, ' Press any key to close ', curses.color_pair(C_DIM))
-    popup.refresh()
 
-    log_lines = []
-    max_lines = ph - 4
+    bar_w = pw - 8
+    last_line = ""
+    frame = 0
+    spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    pct = 0
+
+    def draw(done=False):
+        try:
+            popup.clear()
+            draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-6]} ")
+            # Log line
+            log_display = last_line[:pw-4] if last_line else "Starting..."
+            popup.addstr(2, 3, log_display[:pw-6], curses.color_pair(C_DIM))
+            # Loading bar
+            filled = int(bar_w * pct / 100)
+            bar = "█" * filled + "░" * (bar_w - filled)
+            try:
+                popup.addstr(4, 3, f"[{bar}]", curses.color_pair(C_CYAN))
+            except: pass
+            # Status line
+            if done:
+                popup.addstr(5, 3, f"✔ Complete", curses.color_pair(C_GREEN))
+                popup.addstr(7, 3, "Press any key", curses.color_pair(C_DIM))
+            else:
+                sp = spinner[frame % len(spinner)]
+                popup.addstr(5, 3, f"{sp} Running...  {pct}%", curses.color_pair(C_YELLOW))
+            popup.refresh()
+        except: pass
+
+    draw()
 
     proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, text=True)
+
+    lines_seen = 0
     for line in proc.stdout:
         line = line.rstrip()
-        if line:
-            log_lines.append(line)
-            if len(log_lines) > max_lines:
-                log_lines = log_lines[-max_lines:]
-            popup.clear()
-            draw_border_box(popup, 0, 0, ph, pw, title[:pw-4])
-            for i, l in enumerate(log_lines):
-                popup.addstr(i+2, 2, l[:pw-4], curses.color_pair(C_DIM))
-            popup.addstr(ph-1, 2, ' Running... ', curses.color_pair(C_YELLOW))
-            popup.refresh()
+        # Strip ANSI escape codes
+        line = re.sub(r'\[[0-9;]*[mGKHF]', '', line)
+        if line.strip():
+            last_line = line.strip()
+            lines_seen += 1
+            pct = min(95, lines_seen * 2)
+            frame += 1
+            draw()
     proc.wait()
 
-    popup.clear()
-    draw_border_box(popup, 0, 0, ph, pw, title[:pw-4])
-    for i, l in enumerate(log_lines[-max_lines:]):
-        popup.addstr(i+2, 2, l[:pw-4], curses.color_pair(C_DIM))
-    popup.addstr(ph-1, 2, ' Done — press any key ', curses.color_pair(C_GREEN))
-    popup.refresh()
+    pct = 100
+    draw(done=True)
     popup.getch()
 
 # ── Stack actions ────────────────────────────────────────────────────────────
+GLOBAL_ACTIONS = [
+    ("▶  Up ALL stacks",                 "up_all"),
+    ("■  Down ALL stacks",               "down_all"),
+    ("↺  Restart ALL stacks",            "restart_all"),
+    ("⟳  Recreate ALL stacks",           "recreate_all"),
+    ("✦  Fix ALL stacks",                "fix_all"),
+    ("★  Full Repair ALL (fix+repair+recreate+up)", "full_repair_all"),
+    ("↑  Scale ON all",                  "scale_on_all"),
+    ("↓  Scale OFF all",                 "scale_off_all"),
+    ("↑  Proxy ON all",                  "proxy_on_all"),
+    ("↓  Proxy OFF all",                 "proxy_off_all"),
+    ("✕  Cancel",                        None),
+]
+
 STACK_ACTIONS = [
-    ("▶  Start",       "up"),
-    ("■  Stop",        "down"),
-    ("↺  Restart",     "restart"),
-    ("⟳  Recreate",    "recreate"),
-    ("✦  Fix",         "fix"),
-    ("✦  Repair",      "repair"),
-    ("↑  Scale ON",    "scale_on"),
-    ("↓  Scale OFF",   "scale_off"),
-    ("↑  Proxy ON",    "proxy_on"),
-    ("↓  Proxy OFF",   "proxy_off"),
-    ("✕  Cancel",      None),
+    ("▶  Start",                    "up"),
+    ("■  Stop",                     "down"),
+    ("↺  Restart",                  "restart"),
+    ("⟳  Recreate",                 "recreate"),
+    ("✦  Fix",                      "fix"),
+    ("✦  Repair",                   "repair"),
+    ("⟳  Recreate + Up",             "recreate_up"),
+    ("★  Fix + Repair + Recreate + Up",  "full_repair"),
+    ("◈  Recreate + Repair + Up",    "recreate_repair"),
+    ("◉  Repair + Recreate + Fix + Up",  "deep_repair"),
+    ("↑  Scale ON",                 "scale_on"),
+    ("↓  Scale OFF",                "scale_off"),
+    ("↑  Proxy ON",                 "proxy_on"),
+    ("↓  Proxy OFF",                "proxy_off"),
+    ("✕  Cancel",                   None),
 ]
 
 CONTAINER_ACTIONS = [
@@ -267,6 +318,31 @@ CONFIG_FILES = [
     ("art.conf",     "art.conf"),
 ]
 
+def do_global_action(stdscr, action):
+    if action is None: return
+    if action == 'up_all':
+        run_log_popup(stdscr, 'Up ALL', f'{STACKS_BIN} up')
+    elif action == 'down_all':
+        run_log_popup(stdscr, 'Down ALL', f'{STACKS_BIN} down')
+    elif action == 'restart_all':
+        run_log_popup(stdscr, 'Restart ALL', f'{STACKS_BIN} restart')
+    elif action == 'recreate_all':
+        run_log_popup(stdscr, 'Recreate ALL', f'{STACKS_BIN} up recreate')
+    elif action == 'fix_all':
+        run_log_popup(stdscr, 'Fix ALL', f'{STACKS_BIN} fix all')
+    elif action == 'full_repair_all':
+        run_cmd_silent(stdscr, 'Repair ALL', f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}')
+        run_cmd_silent(stdscr, 'Fix ALL', f'{STACKS_BIN} fix all')
+        run_log_popup(stdscr, 'Up ALL', f'{STACKS_BIN} up')
+    elif action == 'scale_on_all':
+        run_log_popup(stdscr, 'Scale ON all', f'{STACKS_BIN} scale on')
+    elif action == 'scale_off_all':
+        run_log_popup(stdscr, 'Scale OFF all', f'{STACKS_BIN} scale off')
+    elif action == 'proxy_on_all':
+        run_log_popup(stdscr, 'Proxy ON all', f'{STACKS_BIN} proxy on')
+    elif action == 'proxy_off_all':
+        run_log_popup(stdscr, 'Proxy OFF all', f'{STACKS_BIN} proxy off')
+
 def do_stack_action(stdscr, stack_name, action):
     if action is None: return
     if action == 'up':
@@ -289,6 +365,39 @@ def do_stack_action(stdscr, stack_name, action):
         cmd = f'{STACKS_BIN} proxy {stack_name} on'
     elif action == 'proxy_off':
         cmd = f'{STACKS_BIN} proxy {stack_name} off'
+    elif action == 'recreate_up':
+        run_cmd_silent(stdscr, f'Recreate {stack_name}', f'{STACKS_BIN} up {stack_name} recreate')
+        run_log_popup(stdscr, f'Up {stack_name}', f'{STACKS_BIN} up {stack_name}')
+        return
+    elif action == 'full_repair':
+        # Fix + Repair + Recreate + Up
+        run_log_popup(stdscr, f'Fix → {stack_name}',
+                     f'{STACKS_BIN} fix {stack_name}')
+        run_log_popup(stdscr, f'Repair → {stack_name}',
+                     f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}/{stack_name}.yml')
+        run_log_popup(stdscr, f'Recreate → {stack_name}',
+                     f'{STACKS_BIN} up {stack_name} recreate')
+        run_log_popup(stdscr, f'Up → {stack_name}',
+                     f'{STACKS_BIN} up {stack_name}')
+        return
+    elif action == 'recreate_repair':
+        # Recreate + Repair
+        run_log_popup(stdscr, f'Repair → {stack_name}',
+                     f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}/{stack_name}.yml')
+        run_log_popup(stdscr, f'Recreate → {stack_name}',
+                     f'{STACKS_BIN} up {stack_name} recreate')
+        return
+    elif action == 'deep_repair':
+        # Repair + Recreate + Fix + Up
+        run_log_popup(stdscr, f'Repair → {stack_name}',
+                     f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}/{stack_name}.yml')
+        run_log_popup(stdscr, f'Fix → {stack_name}',
+                     f'{STACKS_BIN} fix {stack_name}')
+        run_log_popup(stdscr, f'Recreate → {stack_name}',
+                     f'{STACKS_BIN} up {stack_name} recreate')
+        run_log_popup(stdscr, f'Up → {stack_name}',
+                     f'{STACKS_BIN} up {stack_name}')
+        return
     else: return
     run_log_popup(stdscr, f'{action} → {stack_name}', cmd)
 
@@ -336,8 +445,6 @@ def draw_containers_tab(win, h, w, containers, sel, scroll):
     visible = h - 7
     items = containers[scroll:scroll+visible]
 
-    # Separator between running and stopped
-    running_count = sum(1 for c in containers if c.get('state','').lower() == 'running')
 
     for i, c in enumerate(items):
         y = 5 + i
@@ -347,12 +454,6 @@ def draw_containers_tab(win, h, w, containers, sel, scroll):
         status = c.get('status','')[:11]
         image  = c.get('image','')[:29]
 
-        # Draw separator
-        if idx == running_count and running_count > 0 and scroll <= running_count:
-            sep_y = 5 + (running_count - scroll)
-            if sep_y < h - 2:
-                win.addstr(sep_y, 2, '─'*6 + ' stopped ' + '─'*(w-17),
-                          curses.color_pair(C_DIM))
 
         is_running = state.lower() == 'running'
         color = C_RUNNING if is_running else C_STOPPED
@@ -465,7 +566,7 @@ def main(stdscr):
 
     FOOTER_HINTS = {
         0: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Action', 'Q Quit'],
-        1: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Action', 'Q Quit'],
+        1: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Action', 'A All-Stacks', 'Q Quit'],
         2: ['↔ Switch Tab', 'Q Quit'],
         3: ['↔ Switch Tab', 'Q Quit'],
         4: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Edit', 'Q Quit'],
@@ -509,6 +610,9 @@ def main(stdscr):
 
         k = stdscr.getch()
         if k == -1: continue
+        if k == curses.KEY_RESIZE:
+            stdscr.clear()
+            continue
 
         # Global keys
         if k in (ord('q'), ord('Q')): break
@@ -563,6 +667,10 @@ def main(stdscr):
                     f'Stack: {s["name"][:20]}', STACK_ACTIONS)
                 if result and result[1]:
                     do_stack_action(stdscr, s['name'], result[1])
+            elif k in (ord('a'), ord('A')):
+                result = run_popup_action(stdscr, 'ALL Stacks', GLOBAL_ACTIONS)
+                if result and result[1]:
+                    do_global_action(stdscr, result[1])
 
         elif tab == 2:  # Backup
             if k == ord('b') or k == ord('B'):
