@@ -960,7 +960,6 @@ networks:
             if f"\n{svc_name}\n" not in existing and not existing.startswith(svc_name):
                 with open(desc_file, "a") as df:
                     df.write(f"\n{svc_name}\n{svc_desc}\n")
-    except: pass
 
     except Exception as e:
         import traceback
