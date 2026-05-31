@@ -682,7 +682,7 @@ def run_build_wizard(stdscr, new_stack=False):
     frame = [0]
     pct = [0]
     title = "Build New Service"
-    stdscr.clear(); stdscr.refresh()
+    stdscr.refresh()
 
     def status(msg, p):
         pct[0]=p; frame[0]+=1
@@ -737,20 +737,18 @@ def run_build_wizard(stdscr, new_stack=False):
                 state["target_stack"] = result
                 fpath = os.path.join(STACKS_DIR, result + ".yml")
                 if not os.path.exists(fpath):
-                    template = f"name: {result}
-
-x-common: &common-caps
-  restart: unless-stopped
-  logging:
-    driver: json-file
-    options: {{max-size: 10m, max-file: '3'}}
-
-services:
-
-networks:
-  traefik_net:
-    external: true
-"
+                    template = (
+                        f"name: {result}\n\n"
+                        "x-common: &common-caps\n"
+                        "  restart: unless-stopped\n"
+                        "  logging:\n"
+                        "    driver: json-file\n"
+                        "    options: {max-size: 10m, max-file: '3'}\n\n"
+                        "services:\n\n"
+                        "networks:\n"
+                        "  traefik_net:\n"
+                        "    external: true\n"
+                    )
                     open(fpath, "w").write(template)
                 stacks.append(result)
                 step += 1
@@ -775,12 +773,10 @@ networks:
             else:
                 # Registry search - clears popup after
                 popup.clear(); popup.refresh()
-                stdscr.clear(); stdscr.refresh()
                 chosen = registry_search_popup(stdscr, search_term, bar_w, pct[0], title, spinner, frame)
                 # Recreate popup after registry search closes
                 popup = curses.newwin(ph, pw, py, px)
                 popup.keypad(True)
-                stdscr.clear(); stdscr.refresh()
                 if chosen:
                     state["image"] = chosen
                     step += 1
@@ -868,7 +864,6 @@ networks:
                     comp_img = comp_img_term
                 else:
                     popup.clear(); popup.refresh()
-                    stdscr.clear(); stdscr.refresh()
                     comp_img = registry_search_popup(stdscr, comp_img_term, bar_w, pct[0], title, spinner, frame)
                     popup = curses.newwin(ph, pw, py, px)
                     popup.keypad(True)
