@@ -266,6 +266,8 @@ def clean_log_line(raw):
 def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame):
     """Single line text input inside popup."""
     try:
+        popup.nodelay(False)  # MUST block - no auto-advance
+        popup.timeout(-1)
         popup.clear()
         draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-4]} ")
         filled = int(bar_w * pct / 100)
@@ -565,8 +567,16 @@ def run_build_wizard(stdscr, new_stack=False):
 
     # Step 1: Stack selection
     status("Loading stacks...", 5)
-    stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
+    _raw_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
                      if f.endswith(".yml") and not f.startswith("db_")])
+    stacks = []
+    for _s in _raw_stacks:
+        try:
+            _c = open(os.path.join(STACKS_DIR,_s+".yml")).read()
+            _n = len(re.findall(r"^  [a-zA-Z0-9_-]+:\s*$",_c,re.MULTILINE))
+            stacks.append(f"{_s:<20} [{_n} services]")
+        except: stacks.append(_s)
+    _stack_map = {s.split()[0]: s.split()[0] for s in stacks}
     if new_stack:
         # Create new stack
         stack_name = inp("New stack name (e.g. srvs_3):", "srvs_3")
@@ -601,52 +611,24 @@ networks:
         target_stack = sel("Select target stack:", stacks)
         if not target_stack: return
 
-    # Step 2: Service name
-    svc_name = inp("Service name:", "my-service")
-    if not svc_name: return
-    pct[0] = 10
-
-    # Step 3: Image - type full image to skip search
-    image_input = inp("Docker image (or name to search):", svc_name)
-    if not image_input: return
+    # Step 2: Image search FIRST
+    search_term = inp("Search image (or type full image:tag to skip):", "")
+    if not search_term: return
     image = None
-    if "/" in image_input or ":" in image_input:
-        # Full image provided - use directly
-        image = image_input
-        pct[0] = 25
+    if "/" in search_term or ":" in search_term:
+        image = search_term
+        pct[0] = 20
     else:
-        # Search Docker Hub
-        status(f"Searching Docker Hub for {image_input}...", 15)
-        try:
-            r = _sp.run(["docker","search","--limit","10","--format","{{.Name}}",image_input],
-                       capture_output=True, text=True, timeout=10)
-            images = [l.strip() for l in r.stdout.strip().split("\n") if l.strip()]
-        except: images = []
-        if not images:
-            images = [f"{image_input}:latest", f"lscr.io/linuxserver/{image_input}:latest"]
-        images.insert(0, "Enter manually...")
-        chosen = sel("Select image:", images)
-        if not chosen: return
-        if chosen == "Enter manually...":
-            image = inp("Docker image:", f"{image_input}:latest")
-        else:
-            image = chosen
+        image = registry_search_popup(stdscr, search_term, bar_w, pct[0], title, spinner, frame)
         if not image: return
-        pct[0] = 25
+        pct[0] = 20
 
-    # Step 4: IP and port
-    try:
-        used = set()
-        for f in _gl.glob(f"{STACKS_DIR}/*.yml"):
-            for m in re.findall(r"192\.168\.1\.(\d+)", open(f).read()):
-                used.add(int(m))
-        next_ip_val = "192.168.1." + str(next(i for i in range(200,254) if i not in used))
-    except: next_ip_val = "192.168.1.200"
+    # Step 3: Name - default to image basename
+    img_base = image.split("/")[-1].split(":")[0].lower()
+    svc_name = inp("Container name:", img_base)
+    if not svc_name: svc_name = img_base
+    pct[0] = 25
 
-    svc_ip   = inp("Service IP (192.168.1.x):", next_ip_val)
-    svc_port = inp("Service port:", "8080")
-    container_name = inp("Container name:", svc_name)
-    if not container_name: container_name = svc_name
     pct[0] = 40
 
     # Step 5: Database
@@ -773,6 +755,8 @@ networks:
 def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame):
     """Single line text input inside popup."""
     try:
+        popup.nodelay(False)  # MUST block - no auto-advance
+        popup.timeout(-1)
         popup.clear()
         draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-4]} ")
         filled = int(bar_w * pct / 100)
@@ -893,244 +877,6 @@ def _load_registry_searchers():
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.REGISTRIES, mod.search_all
-
-def run_build_wizard(stdscr, new_stack=False):
-    """Full curses build wizard - same questions as stacks build."""
-    import subprocess as _sp, glob as _gl, time as _t
-    h, w = stdscr.getmaxyx()
-    pw = min(w-4, 74); ph = 14
-    py = (h-ph)//2; px = (w-pw)//2
-    popup = curses.newwin(ph, pw, py, px)
-    popup.keypad(True)
-    bar_w = pw - 6
-    spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    frame = [0]
-    pct = [0]
-    title = "Build New Service"
-
-    stdscr.clear(); stdscr.refresh()
-
-    def status(msg, p):
-        pct[0]=p; frame[0]+=1
-        _bw_status(popup, pw, ph, msg, bar_w, pct[0], title, spinner, frame[0])
-
-    def inp(prompt, default=""):
-        frame[0]+=1
-        return _bw_input(popup, pw, ph, prompt, default, bar_w, pct[0], title, spinner, frame[0])
-
-    def sel(prompt, items):
-        frame[0]+=1
-        return _bw_select(popup, pw, ph, prompt, items, bar_w, pct[0], title, spinner, frame[0])
-
-    def yn(prompt, default="n"):
-        frame[0]+=1
-        return _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct[0], title, spinner, frame[0])
-
-    # Step 1: Stack selection
-    status("Loading stacks...", 5)
-    stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
-                     if f.endswith(".yml") and not f.startswith("db_")])
-    if new_stack:
-        # Create new stack
-        stack_name = inp("New stack name (e.g. srvs_3):", "srvs_3")
-        if not stack_name: return
-        fpath = os.path.join(STACKS_DIR, stack_name + ".yml")
-        if os.path.exists(fpath):
-            status(f"{stack_name}.yml already exists - adding to it", 5)
-        else:
-            # Create new stack from template
-            template = f"""name: {stack_name}
-# ══════════════════════════════════════════════════
-# {stack_name} stack
-# ══════════════════════════════════════════════════
-
-x-common: &common-caps
-  restart: unless-stopped
-  logging:
-    driver: json-file
-    options: {{max-size: 10m, max-file: '3'}}
-
-services:
-
-networks:
-  traefik_net:
-    external: true
-"""
-            open(fpath, "w").write(template)
-            status(f"Created {stack_name}.yml", 8)
-        target_stack = stack_name
-        stacks.append(stack_name)
-    else:
-        target_stack = sel("Select target stack:", stacks)
-        if not target_stack: return
-
-    # Step 2: Service name
-    svc_name = inp("Service name:", "my-service")
-    if not svc_name: return
-    pct[0] = 10
-
-    # Step 3: Image - type full image to skip search
-    image_input = inp("Docker image (or name to search):", svc_name)
-    if not image_input: return
-    image = None
-    if "/" in image_input or ":" in image_input:
-        # Full image provided - use directly
-        image = image_input
-        pct[0] = 25
-    else:
-        # Search Docker Hub
-        status(f"Searching Docker Hub for {image_input}...", 15)
-        try:
-            r = _sp.run(["docker","search","--limit","10","--format","{{.Name}}",image_input],
-                       capture_output=True, text=True, timeout=10)
-            images = [l.strip() for l in r.stdout.strip().split("\n") if l.strip()]
-        except: images = []
-        if not images:
-            images = [f"{image_input}:latest", f"lscr.io/linuxserver/{image_input}:latest"]
-        images.insert(0, "Enter manually...")
-        chosen = sel("Select image:", images)
-        if not chosen: return
-        if chosen == "Enter manually...":
-            image = inp("Docker image:", f"{image_input}:latest")
-        else:
-            image = chosen
-        if not image: return
-        pct[0] = 25
-
-    # Step 4: IP and port
-    try:
-        used = set()
-        for f in _gl.glob(f"{STACKS_DIR}/*.yml"):
-            for m in re.findall(r"192\.168\.1\.(\d+)", open(f).read()):
-                used.add(int(m))
-        next_ip_val = "192.168.1." + str(next(i for i in range(200,254) if i not in used))
-    except: next_ip_val = "192.168.1.200"
-
-    svc_ip   = inp("Service IP (192.168.1.x):", next_ip_val)
-    svc_port = inp("Service port:", "8080")
-    container_name = inp("Container name:", svc_name)
-    if not container_name: container_name = svc_name
-    pct[0] = 40
-
-    # Step 5: Database
-    db_info = None
-    needs_db = yn("Does this service need a database?", "n")
-    if needs_db == "y":
-        db_type = sel("Database type:", ["postgres","mysql","mariadb","mongo","redis","none"])
-        if db_type and db_type != "none":
-            db_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
-                               if re.match(r"db_\d+\.yml", f)])
-            db_target = sel("Which DB stack:", db_stacks)
-            if db_target:
-                db_name = inp("DB container name:", f"{svc_name}-{db_type}")
-                db_pass = inp("DB password:", "changeme")
-                db_db   = inp("DB name:", svc_name.replace("-","_"))
-                db_info = {"type":db_type,"name":db_name,"pass":db_pass,
-                          "db":db_db,"stack":db_target}
-    pct[0] = 55
-
-    # Step 6: Redis
-    redis_info = None
-    if not (db_info and db_info.get("type")=="redis"):
-        needs_redis = yn("Does this service need Redis?", "n")
-        if needs_redis == "y":
-            redis_name  = inp("Redis container name:", f"{svc_name}-redis")
-            redis_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
-                                   if re.match(r"db_\d+\.yml", f)])
-            redis_stack = sel("Which DB stack for Redis:", redis_stacks)
-            redis_info = {"name":redis_name,"stack":redis_stack}
-    pct[0] = 65
-
-    # Step 7: Companion
-    companion_info = None
-    needs_comp = yn("Does this service need a companion container?", "n")
-    if needs_comp == "y":
-        comp_name  = inp("Companion name:", f"{svc_name}-worker")
-        comp_img   = inp("Companion image:", f"{svc_name}-worker:latest")
-        comp_stack = sel("Which stack for companion:", stacks)
-        if comp_stack:
-            companion_info = {"name":comp_name,"image":comp_img,"stack":comp_stack}
-    pct[0] = 75
-
-    # Step 8: Build scaffold
-    status("Building compose scaffold...", 80)
-    net_name = container_name.replace("-","_") + "_net"
-
-    block = "\n".join([
-        f"  # ── {container_name} ──────────────────────────────────────────",
-        f"  {svc_name}:",
-        f"    <<: *common-caps",
-        f"    image: {image}",
-        f"    container_name: {container_name}",
-        f"    hostname: {container_name}",
-        f"    domainname: {container_name}.example.com",
-        f"    networks:",
-        f"      {net_name}:",
-        f"        ipv4_address: {svc_ip}",
-        f"      traefik_net:",
-        f"        priority: 1000",
-        f"    labels:",
-        f'      - "traefik.enable=true"',
-        f'      - "traefik.http.routers.{svc_name}.rule=Host(`{svc_name}.example.com`)"',
-        f'      - "traefik.http.services.{svc_name}.loadbalancer.server.port={svc_port}"',
-        f'      - "sablier.enable=true"',
-        f'      - "sablier.group=srvs"',
-    ]) + "\n"
-
-    # Inject into stack
-    fpath = os.path.join(STACKS_DIR, target_stack + ".yml")
-    try:
-        fcontent = open(fpath).read()
-        if "##STACKS_ART_START_FOOTER" in fcontent:
-            fcontent = fcontent.replace("##STACKS_ART_START_FOOTER",
-                                       block + "\n##STACKS_ART_START_FOOTER", 1)
-        else:
-            lines = fcontent.splitlines(keepends=True)
-            insert = len(lines)
-            for i in range(len(lines)-1,-1,-1):
-                if not lines[i].startswith("#") and lines[i].strip():
-                    insert = i+1; break
-            lines.insert(insert, block+"\n")
-            fcontent = "".join(lines)
-        open(fpath,"w").write(fcontent)
-    except Exception as e:
-        status(f"Error: {e}", 90)
-        _t.sleep(2); return
-
-    pct[0] = 90
-
-    # Step 9: Start service?
-    start_action = sel("Start now?", [
-        f"Start just {container_name}",
-        f"Start whole stack: {target_stack}",
-        "Don't start yet",
-    ])
-    pct[0] = 95
-
-    if start_action and "Don't" not in start_action:
-        if "whole stack" in start_action:
-            run_log_popup(stdscr, f"Up {target_stack}", f"{STACKS_BIN} up {target_stack}")
-        else:
-            run_log_popup(stdscr, f"Start {container_name}",
-                         f"docker compose -f {fpath} up -d {svc_name}")
-
-    # Done
-    pct[0] = 100
-    popup.clear()
-    draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-4]} ")
-    bar = "█" * bar_w
-    try: popup.addstr(2, 2, f"[{bar}]", curses.color_pair(C_CYAN))
-    except: pass
-    try: popup.addstr(4, 3, f"✔ {container_name} added to {target_stack}!", curses.color_pair(C_GREEN))
-    except: pass
-    try: popup.addstr(5, 3, f"  Image:  {image[:pw-12]}", curses.color_pair(C_DIM))
-    except: pass
-    try: popup.addstr(6, 3, f"  IP:     {svc_ip}  Port: {svc_port}", curses.color_pair(C_DIM))
-    except: pass
-    try: popup.addstr(8, 3, "Press any key", curses.color_pair(C_DIM))
-    except: pass
-    popup.refresh()
-    popup.getch()
 
 def run_sequence_popup(stdscr, title, steps):
     import time as _t
