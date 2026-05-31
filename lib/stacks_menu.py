@@ -951,6 +951,21 @@ networks:
         open(fpath,"w").write(fcontent)
     except Exception as _inje:
         pass
+    # Log the build
+    try:
+        import datetime as _dt
+        with open("/srv/stacks/stacks_build.log", "a") as _bl:
+            _bl.write(f"\n=== Wizard Build: {_dt.datetime.now()} ===\n")
+            _bl.write(f"  Service:    {svc_name}\n")
+            _bl.write(f"  Image:      {image}\n")
+            _bl.write(f"  Stack:      {target_stack}\n")
+            _bl.write(f"  IP:         {svc_ip}\n")
+            _bl.write(f"  Port:       {svc_port}\n")
+            if db_info: _bl.write(f"  DB:         {db_info.get('type')} ({db_info.get('name')})\n")
+            if redis_info: _bl.write(f"  Redis:      {redis_info.get('name')}\n")
+            _bl.write(f"  Injected:   {fpath}\n")
+    except: pass
+
     # Write new service + description to descriptions file for future editing
     try:
         desc_file = ""
@@ -1813,6 +1828,9 @@ def main(stdscr):
             import glob as _glob
             _log_dir = '/srv/stacks'
             _log_files = sorted(_glob.glob(f'{_log_dir}/stacks_*.log'))
+    # Add build log if it exists
+    _build_log = f'{_log_dir}/stacks_build.log'
+    if os.path.exists(_build_log) and _build_log not in _log_files: _log_files.insert(0, _build_log)
             log_sources = [(f.split('/')[-1], f'cat {f}') for f in _log_files]
             if not log_sources:
                 log_sources = [('No logs found', 'echo No stacks logs found')]

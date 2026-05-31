@@ -2341,8 +2341,9 @@ DYNEOF
 elif [ "$COMMAND" == "build" ]; then
   stty echo 2>/dev/null
   printf "\e[?25h"
-  _blog="/tmp/stacks_build_out_$$"
-  python3 /usr/local/lib/stacks_build.py "${TARGET_ARGS[@]}" </dev/tty | tee "$_blog"
+  _blog="/srv/stacks/stacks_build.log"
+  echo "=== Build Started: $(date) ===" >> "$_blog"
+  python3 /usr/local/lib/stacks_build.py "${TARGET_ARGS[@]}" </dev/tty | tee -a "$_blog"
   stty echo 2>/dev/null
   _start=$(grep "^BUILD_START:" "$_blog" 2>/dev/null | tail -1 | sed "s/BUILD_START://")
   rm -f "$_blog"
