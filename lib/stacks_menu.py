@@ -336,9 +336,8 @@ def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
             if ch == curses.KEY_MOUSE: continue
             if ch in (10, 13):  # Enter
                 break
-            elif ch == 27:  # ESC
-                val = []
-                break
+            elif ch == 27:  # ESC = go back
+                return None
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 if val: val.pop()
             elif 32 <= ch <= 126:
