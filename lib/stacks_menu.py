@@ -2079,14 +2079,14 @@ def main(stdscr):
             if k == curses.KEY_UP:
                 cfg_sel = max(0, cfg_sel - 1)
             elif k == curses.KEY_DOWN:
-                cfg_sel = min(len(CONFIG_FILES)-1, cfg_sel + 1)
+            elif k == curses.KEY_DOWN: cfg_sel = min(len(get_config_items())-1, cfg_sel+1)
             elif k in (10, 13):
-                _, fname = CONFIG_FILES[cfg_sel]
-                fpath = os.path.join(CONF_DIR, fname)
-                editor = os.environ.get('EDITOR', 'nano')
-                curses.endwin()
-                os.system(f'{editor} {fpath}')
-                stdscr = curses.initscr()
+                label, fpath, is_dir = get_config_items()[cfg_sel]
+                if not is_dir:
+                    editor = os.environ.get('EDITOR', 'nano')
+                    curses.endwin()
+                    os.system(f'{editor} {fpath}')
+                    stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
                 init_colors()
                 curses.curs_set(0)
                 stdscr.clear()
