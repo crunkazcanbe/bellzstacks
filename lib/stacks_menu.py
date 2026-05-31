@@ -711,16 +711,19 @@ def run_build_wizard(stdscr, new_stack=False):
     def inp(prompt, default=""):
         frame[0]+=1
         curses.flushinp()
+        import time as _t; _t.sleep(0.05)
         return _bw_input(popup, pw, ph, prompt, default, bar_w, pct[0], title, spinner, frame[0])
 
     def sel(prompt, items):
         frame[0]+=1
         curses.flushinp()
+        import time as _t; _t.sleep(0.05)
         return _bw_select(popup, pw, ph, prompt, items, bar_w, pct[0], title, spinner, frame[0])
 
     def yn(prompt, default="n"):
         frame[0]+=1
         curses.flushinp()
+        import time as _t; _t.sleep(0.05)
         return _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct[0], title, spinner, frame[0])
 
     # State for all steps
@@ -1113,8 +1116,11 @@ def run_build_wizard(stdscr, new_stack=False):
         else:
             run_log_popup(stdscr, f"Start {container_name}", f"docker compose -f {fpath} up -d {svc_name}")
 
-    # Done
+    # Done - clear everything first
+    stdscr.clear(); stdscr.refresh()
     pct[0] = 100
+    popup = curses.newwin(ph, pw, py, px)
+    popup.keypad(True)
     popup.clear()
     draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-4]} ")
     bar = "█" * bar_w
