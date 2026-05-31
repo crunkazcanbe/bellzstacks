@@ -748,8 +748,20 @@ networks:
             fcontent = "".join(lines)
         open(fpath,"w").write(fcontent)
     except Exception as e:
-        status(f"Error: {e}", 90)
-        _t.sleep(2); return
+        import traceback
+        err = traceback.format_exc()
+        popup.clear()
+        draw_border_box(popup, 0, 0, ph, pw, " Build Error ")
+        lines_err = err.strip().split("\n")
+        for ei, el in enumerate(lines_err[-8:]):
+            try: popup.addstr(2+ei, 2, el[:pw-4], curses.color_pair(C_RED))
+            except: pass
+        try: popup.addstr(ph-2, 2, "Press any key", curses.color_pair(C_DIM))
+        except: pass
+        popup.nodelay(False)
+        popup.refresh()
+        popup.getch()
+        return
 
     pct[0] = 90
 
@@ -1420,7 +1432,7 @@ def main(stdscr):
         2: ['↑↓ Select', '↔ Tab', 'ENTER Open', 'Q Quit'],
         3: ['↑↓ Select', '↔ Tab', 'ENTER Edit', 'A Inject Art', 'Q Quit'],
         4: ['I Inject All', 'S Strip All', 'D Dyn Inject', 'X Dyn Strip', 'E Edit Art Conf', 'Q Quit'],
-        6: ['N/Enter Build', 'G Gen Dynamics', 'D Gen All', 'I Gen Inject', 'Q Quit'],
+        6: ['↑↓ Navigate', 'ENTER Select', 'Q Quit'],
         2: ['↔ Switch Tab', 'Q Quit'],
         3: ['↔ Switch Tab', 'Q Quit'],
         4: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Edit', 'Q Quit'],
