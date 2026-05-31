@@ -642,6 +642,8 @@ def draw_art_tab(win, h, w):
             ("D", "Inject art into ALL dynamics"),
             ("X", "Strip art from ALL dynamics"),
             ("E", "Edit art.conf (art config)"),
+            ("G", "Generate dynamics from ALL stacks"),
+            ("F", "Force regenerate ALL (overwrite)"),
             ("R", "Repair ALL dynamic configs"),
             ("U", "Edit stack_urls.conf (URLs config)"),
         ]
@@ -876,10 +878,12 @@ def main(stdscr):
             elif k in (ord('a'), ord('A')) and dyn_files:
                 fname = os.path.basename(dyn_files[sel]).replace('.yml','').replace('.yaml','')
                 dyn_actions = [
-                    ('🎨  Art Inject',  'dyn_art_inject'),
-                    ('🧹  Art Strip',   'dyn_art_strip'),
-                    ('🔧  Repair',      'dyn_repair'),
-                    ('✕  Cancel',      None),
+                    ('🎨  Art Inject',       'dyn_art_inject'),
+                    ('🧹  Art Strip',        'dyn_art_strip'),
+                    ('🔧  Repair',           'dyn_repair'),
+                    ('⚙  Regenerate',       'dyn_gen'),
+                    ('⚙  Force Regen',      'dyn_gen_force'),
+                    ('✕  Cancel',           None),
                 ]
                 result = run_popup_action(stdscr, f'Dynamic: {fname[:20]}', dyn_actions)
                 if result and result[1] == 'dyn_art_inject':
@@ -891,6 +895,14 @@ def main(stdscr):
                 elif result and result[1] == 'dyn_repair':
                     run_log_popup(stdscr, f'Repair: {fname}',
                         f'python3 /usr/local/lib/stacks_repair_dynamic.py {dyn_files[sel]}')
+                elif result and result[1] == 'dyn_gen':
+                    stack_name = fname + '.yml'
+                    run_log_popup(stdscr, f'Gen: {fname}',
+                        f'python3 /usr/local/lib/stacks_gen_dynamic.py {stack_name}')
+                elif result and result[1] == 'dyn_gen_force':
+                    stack_name = fname + '.yml'
+                    run_log_popup(stdscr, f'Force gen: {fname}',
+                        f'python3 /usr/local/lib/stacks_gen_dynamic.py {stack_name} --force')
         elif tab == 4:  # Art
             if k in (ord('i'), ord('I')):
                 run_log_popup(stdscr, 'Art inject ALL stacks', f'{STACKS_BIN} art inject all')
@@ -905,6 +917,12 @@ def main(stdscr):
                 curses.endwin()
                 os.system(f'{editor} {CONF_DIR}/art.conf')
                 stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+            elif k in (ord('g'), ord('G')):
+                run_log_popup(stdscr, 'Generate ALL dynamics',
+                    f'python3 /usr/local/lib/stacks_gen_dynamic.py all')
+            elif k in (ord('f'), ord('F')):
+                run_log_popup(stdscr, 'Force regen ALL dynamics',
+                    f'python3 /usr/local/lib/stacks_gen_dynamic.py all --force')
             elif k in (ord('r'), ord('R')):
                 run_log_popup(stdscr, 'Repair ALL dynamics',
                     f'python3 /usr/local/lib/stacks_repair_dynamic.py {DYNAMICS_DIR}')
