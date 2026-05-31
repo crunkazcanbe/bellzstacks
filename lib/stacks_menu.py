@@ -738,6 +738,7 @@ def run_build_wizard(stdscr, new_stack=False):
     while True:
         current = STEPS[step] if step < len(STEPS) else "done"
 
+        curses.flushinp()  # flush buffered keys between steps
         if current == "stack":
             pct[0] = 5
             if new_stack:
