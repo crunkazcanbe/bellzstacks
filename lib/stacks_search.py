@@ -36,38 +36,51 @@ def http_get_json(url, headers=None, timeout=TIMEOUT):
 
 
 def search_docker_hub(keyword, page, limit):
-    url = f"https://hub.docker.com/v2/search/repositories/?query={urllib.parse.quote(keyword)}&page_size={limit}&page={page}"
-    data = http_get_json(url)
-    if "_error" in data:
-        return [{"_error": data["_error"]}]
+    """Search Docker Hub - fetches up to 3 pages of 100 for ~300 results."""
     out = []
-    for r in data.get("results", []):
-        ns = r.get("repo_owner") or "library"
-        name = r.get("repo_name", "")
-        out.append({
-            "name": name, "namespace": ns, "registry": "docker.io",
-            "pull": f"{ns}/{name}" if ns != "library" else name,
-            "stars": r.get("star_count"), "pulls": r.get("pull_count"),
-            "desc": (r.get("short_description") or "").strip(),
-            "official": r.get("is_official", False),
-            "url": f"https://hub.docker.com/r/{ns}/{name}"
-        })
+    seen = set()
+    for p in range(1, 4):
+        url = f"https://hub.docker.com/v2/search/repositories/?query={urllib.parse.quote(keyword)}&page_size=100&page={p}"
+        data = http_get_json(url)
+        if "_error" in data: break
+        results = data.get("results", [])
+        if not results: break
+        for r in results:
+            ns = r.get("repo_owner") or "library"
+            name = r.get("repo_name", "")
+            key = f"{ns}/{name}"
+            if key in seen: continue
+            seen.add(key)
+            out.append({
+                "name": name, "namespace": ns, "registry": "docker.io",
+                "pull": f"{ns}/{name}" if ns != "library" else name,
+                "stars": r.get("star_count"), "pulls": r.get("pull_count"),
+                "desc": (r.get("short_description") or "").strip(),
+                "url": f"https://hub.docker.com/r/{ns}/{name}"
+            })
+        if len(data.get("results",[])) < 100: break  # last page
     return out
 
 
 def search_ghcr(keyword, page, limit):
-    url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(keyword)}+packages:>=1&per_page={limit}&page={page}"
-    data = http_get_json(url, headers={"Accept": "application/vnd.github+json"})
+    # Search GitHub repos that have container packages
+    url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(keyword)}&per_page={limit}&page={page}&sort=stars"
+    data = http_get_json(url, headers={
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    })
     if "_error" in data:
         return [{"_error": data["_error"]}]
     out = []
     for r in data.get("items", []):
         owner = r.get("owner", {}).get("login", "")
         name = r.get("name", "")
+        if not owner or not name: continue
         out.append({
             "name": name, "namespace": owner, "registry": "ghcr.io",
             "pull": f"ghcr.io/{owner}/{name}".lower(),
             "stars": r.get("stargazers_count"),
+            "pulls": r.get("watchers_count"),
             "desc": (r.get("description") or "").strip(),
             "url": r.get("html_url", "")
         })
@@ -95,13 +108,17 @@ def search_quay(keyword, page, limit):
 
 
 def search_lscr(keyword, page, limit):
-    url = f"https://hub.docker.com/v2/repositories/linuxserver/?page_size={limit}&page={page}&name={urllib.parse.quote(keyword)}"
+    # LinuxServer has limited repos - search without filter then match
+    url = f"https://hub.docker.com/v2/repositories/linuxserver/?page_size=100&page={page}"
     data = http_get_json(url)
     if "_error" in data:
         return [{"_error": data["_error"]}]
+    kw = keyword.lower()
     out = []
-    for r in data.get("results", [])[:limit]:
+    for r in data.get("results", []):
         name = r.get("name", "")
+        if kw and kw not in name.lower() and kw not in (r.get("description") or "").lower():
+            continue
         out.append({
             "name": name, "namespace": "linuxserver", "registry": "lscr.io",
             "pull": f"lscr.io/linuxserver/{name}",
@@ -109,6 +126,7 @@ def search_lscr(keyword, page, limit):
             "desc": (r.get("description") or "").strip(),
             "url": f"https://hub.docker.com/r/linuxserver/{name}"
         })
+        if len(out) >= limit: break
     return out
 
 
@@ -131,17 +149,16 @@ def search_bitnami(keyword, page, limit):
 
 
 def search_gitlab(keyword, page, limit):
-    url = f"https://gitlab.com/api/v4/projects?search={urllib.parse.quote(keyword)}&per_page={limit}&page={page}&order_by=stars"
-    data = http_get_json(url)
+    url = f"https://gitlab.com/api/v4/projects?search={urllib.parse.quote(keyword)}&per_page={limit}&page={page}&order_by=star_count&sort=desc&with_packages=true"
+    data = http_get_json(url, headers={"Accept": "application/json"})
     if isinstance(data, dict) and "_error" in data:
         return [{"_error": data["_error"]}]
     if not isinstance(data, list):
-        return [{"_error": "gitlab returned non-list"}]
+        return []
     out = []
     for r in data[:limit]:
         path = r.get("path_with_namespace", "")
-        if not path:
-            continue
+        if not path: continue
         out.append({
             "name": r.get("path", ""), "namespace": r.get("namespace", {}).get("path", ""),
             "registry": "registry.gitlab.com",
@@ -173,7 +190,8 @@ def search_mcr(keyword, page, limit):
 
 def search_artifacthub(keyword, page, limit):
     offset = (page - 1) * limit
-    url = f"https://artifacthub.io/api/v1/packages/search?ts_query_web={urllib.parse.quote(keyword)}&limit={limit}&offset={offset}"
+    # kind=12 = container images only (not helm charts)
+    url = f"https://artifacthub.io/api/v1/packages/search?ts_query_web={urllib.parse.quote(keyword)}&limit={limit}&offset={offset}&kind=12"
     data = http_get_json(url)
     if "_error" in data:
         return [{"_error": data["_error"]}]
@@ -183,7 +201,7 @@ def search_artifacthub(keyword, page, limit):
         kind = repo.get("kind_name", "helm")
         name = r.get("name", "")
         repo_name = repo.get("name", "")
-        pull = f"helm install {name} {repo_name}/{name}" if kind == "helm" else f"docker pull {repo_name}/{name}"
+        pull = f"{repo_name}/{name}" if repo_name else name
         out.append({
             "name": name, "namespace": repo_name,
             "registry": f"artifacthub:{kind}",
@@ -196,41 +214,114 @@ def search_artifacthub(keyword, page, limit):
 
 
 def search_aws_ecr(keyword, page, limit):
-    url = "https://gallery.ecr.aws/api/search"
-    body = json.dumps({
-        "operationName": "searchRepositoryCatalogData",
-        "variables": {"searchTerm": keyword, "page": page, "size": limit, "sortBy": "POPULARITY"},
-        "query": "query searchRepositoryCatalogData($searchTerm: String, $page: Int, $size: Int, $sortBy: String) { searchRepositoryCatalogData(searchTerm: $searchTerm, page: $page, size: $size, sortBy: $sortBy) { repositories { primaryRegistryAliasName repositoryName shortDescription downloadCount } } }"
-    }).encode()
+    """Search Docker Hub verified publishers (replaces broken ECR API)."""
     try:
-        req = urllib.request.Request(url, data=body,
-            headers={"User-Agent": UA, "Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            data = json.loads(r.read().decode())
+        url = f"https://hub.docker.com/v2/search/repositories/?query={urllib.parse.quote(keyword)}&page_size={limit}&page={page}&content_types=image&image_filter=store"
+        data = http_get_json(url)
+        if "_error" in data: return []
+        out = []
+        for r in data.get("results", [])[:limit]:
+            ns = r.get("repo_owner") or "library"
+            name = r.get("repo_name", "")
+            out.append({
+                "name": name, "namespace": ns, "registry": "docker.io (verified)",
+                "pull": f"{ns}/{name}" if ns != "library" else name,
+                "stars": r.get("star_count"), "pulls": r.get("pull_count"),
+                "desc": (r.get("short_description") or "").strip(),
+            })
+        return out
     except Exception as e:
-        return [{"_error": f"ecr: {str(e)[:40]}"}]
+        return [{"_error": f"verified: {str(e)[:40]}"}]
+
+def search_forgejo(keyword, page, limit):
+    """Search Codeberg/Forgejo container registry."""
+    try:
+        url = f"https://codeberg.org/api/v1/repos/search?q={urllib.parse.quote(keyword)}&limit={limit}&page={page}&topic=true"
+        data = http_get_json(url, headers={"Accept": "application/json"})
+        if "_error" in data: return []
+        out = []
+        for r in (data.get("data") or [])[:limit]:
+            owner = r.get("owner", {}).get("login", "")
+            name = r.get("name", "")
+            if not owner: continue
+            out.append({
+                "name": name, "namespace": owner, "registry": "codeberg.org",
+                "pull": f"codeberg.org/{owner}/{name}".lower(),
+                "stars": r.get("stars_count"),
+                "desc": (r.get("description") or "").strip(),
+            })
+        return out
+    except Exception as e:
+        return [{"_error": f"codeberg: {str(e)[:40]}"}]
+
+
+
+def search_dockerhub_official(keyword, page, limit):
+    """Search Docker Hub official images."""
+    url = f"https://hub.docker.com/v2/search/repositories/?query={urllib.parse.quote(keyword)}&page_size=50&page={page}&is_official=1"
+    data = http_get_json(url)
+    if "_error" in data: return []
     out = []
-    repos = data.get("data", {}).get("searchRepositoryCatalogData", {}).get("repositories", []) or []
-    for r in repos[:limit]:
-        ns = r.get("primaryRegistryAliasName") or ""
-        name = r.get("repositoryName") or ""
-        if not name:
-            continue
+    for r in data.get("results", []):
+        ns = r.get("repo_owner") or "library"
+        name = r.get("repo_name", "")
         out.append({
-            "name": name, "namespace": ns, "registry": "public.ecr.aws",
-            "pull": f"public.ecr.aws/{ns}/{name}" if ns else name,
-            "pulls": r.get("downloadCount"),
-            "desc": (r.get("shortDescription") or "").strip(),
+            "name": name, "namespace": ns, "registry": "docker.io (official)",
+            "pull": name if ns == "library" else f"{ns}/{name}",
+            "stars": r.get("star_count"), "pulls": r.get("pull_count"),
+            "desc": (r.get("short_description") or "").strip(),
         })
     return out
 
+def search_selfhosted_io(keyword, page, limit):
+    """Search awesome-selfhosted via GitHub."""
+    url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(keyword)}+topic:self-hosted&per_page={limit}&page={page}&sort=stars"
+    data = http_get_json(url, headers={"Accept": "application/vnd.github+json"})
+    if "_error" in data: return []
+    out = []
+    for r in data.get("items", []):
+        owner = r.get("owner", {}).get("login", "")
+        name = r.get("name", "")
+        if not owner: continue
+        out.append({
+            "name": name, "namespace": owner, "registry": "ghcr.io",
+            "pull": f"ghcr.io/{owner}/{name}".lower(),
+            "stars": r.get("stargazers_count"),
+            "desc": (r.get("description") or "").strip(),
+        })
+    return out
+
+def search_portainer_templates(keyword, page, limit):
+    """Search Portainer community templates."""
+    try:
+        url = "https://raw.githubusercontent.com/portainer/templates/master/templates-2.0.json"
+        data = http_get_json(url)
+        if "_error" in data: return []
+        out = []
+        kw = keyword.lower()
+        for t in data.get("templates", []):
+            name = t.get("name","").lower()
+            title = t.get("title","").lower()
+            if kw in name or kw in title:
+                image = t.get("image","")
+                out.append({
+                    "name": t.get("name",""), "namespace": "",
+                    "registry": "portainer-templates",
+                    "pull": image,
+                    "desc": (t.get("description") or "").strip(),
+                })
+        return out[:limit]
+    except: return []
 
 REGISTRIES = {
-    "Docker Hub":       search_docker_hub,
-    "GitHub (ghcr.io)": search_ghcr,
+    "Docker Hub":        search_docker_hub,
+    "Hub Official":      search_dockerhub_official,
+    "GitHub (ghcr.io)":  search_ghcr,
+    "Self-Hosted":       search_selfhosted_io,
     "Quay.io":          search_quay,
     "GitLab Registry":  search_gitlab,
-    "AWS Public ECR":   search_aws_ecr,
+    "Verified Pub":      search_aws_ecr,
+    "Codeberg":          search_forgejo,
     "LinuxServer.io":   search_lscr,
     "Bitnami":          search_bitnami,
     "Microsoft MCR":    search_mcr,
