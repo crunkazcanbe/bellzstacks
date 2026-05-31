@@ -900,7 +900,6 @@ networks:
             bl.append(f"  {desc_line}" if not desc_line.startswith("  ") else desc_line)
     bl.append(f"  # ---------------------------------------------------------")
     bl.append(f"  {svc_name}:")
-    bl.append(f"  {svc_name}:")
     if cfg.get("use_common_caps",True): bl.append("    <<: *common-caps")
     bl.append(f"    image: {image}")
     bl.append(f"    container_name: {container_name}")
@@ -940,7 +939,6 @@ networks:
     if sab_enable: bl.append('      - "sablier.enable=true"')
     bl.append(f'      - "sablier.group={sab_group}"')
     for el in extra_labels: bl.append(f'      - "{el}"')
-    bl.append("")
     block = "\n".join(bl) + "\n"
 
 
