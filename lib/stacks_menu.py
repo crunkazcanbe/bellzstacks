@@ -117,7 +117,7 @@ def refresh_data():
             app_data['stacks'] = stacks
             app_data['containers'] = containers
             app_data['last_update'] = time.time()
-        time.sleep(5)
+        time.sleep(8)
 
 # ── Drawing helpers ──────────────────────────────────────────────────────────
 def draw_header(win, title, w):
