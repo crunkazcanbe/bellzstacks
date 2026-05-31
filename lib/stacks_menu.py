@@ -283,12 +283,9 @@ def run_sequence_popup(stdscr, title, steps):
             if done:
                 try: popup.addstr(4,3,"✔ All done — press any key",curses.color_pair(C_GREEN))
                 except: pass
-                try: popup.addstr(5,3,f"Step {total}/{total} complete",curses.color_pair(C_DIM))
-                except: pass
             else:
-                try: popup.addstr(4,3,f"{slabel}  {pct}%",curses.color_pair(C_YELLOW))
-                except: pass
-                try: popup.addstr(5,3,f"Step {idx+1}/{total}",curses.color_pair(C_DIM))
+                sp=spinner[frame%len(spinner)]
+                try: popup.addstr(4,3,f"{sp} Step {idx+1}/{total}: {slabel}  {pct}%",curses.color_pair(C_YELLOW))
                 except: pass
             popup.refresh()
         except: pass
