@@ -422,7 +422,7 @@ def _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
         elif k in (10, 13): return "y" if sel==0 else "n"
         elif k in (ord("y"), ord("Y")): return "y"
         elif k in (ord("n"), ord("N")): return "n"
-        elif k == 27: return default
+        elif k == 27: return None
 
 
 def _bw_status(popup, pw, ph, msg, bar_w, pct, title, spinner, frame):
@@ -1216,7 +1216,7 @@ def _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
         elif k in (10, 13): return "y" if sel==0 else "n"
         elif k in (ord("y"), ord("Y")): return "y"
         elif k in (ord("n"), ord("N")): return "n"
-        elif k == 27: return default
+        elif k == 27: return None
 
 
 def _bw_status(popup, pw, ph, msg, bar_w, pct, title, spinner, frame):
