@@ -694,6 +694,8 @@ def _registry_search_inner(stdscr, term, bar_w, pct, title, spinner, frame):
             return None
         elif k == 27:
             return None
+        elif k == 3:  # Ctrl+C
+            return None
 
 def run_build_wizard(stdscr, new_stack=False):
     """Full curses build wizard with back navigation."""
