@@ -735,6 +735,7 @@ def main(stdscr):
         2: ['↑↓ Select', '↔ Tab', 'ENTER Open', 'Q Quit'],
         3: ['↑↓ Select', '↔ Tab', 'ENTER Edit', 'A Inject Art', 'Q Quit'],
         4: ['I Inject All', 'S Strip All', 'D Dyn Inject', 'X Dyn Strip', 'E Edit Art Conf', 'Q Quit'],
+        6: ['N/Enter Build', 'G Gen Dynamics', 'D Gen All', 'I Gen Inject', 'Q Quit'],
         2: ['↔ Switch Tab', 'Q Quit'],
         3: ['↔ Switch Tab', 'Q Quit'],
         4: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Edit', 'Q Quit'],
@@ -940,10 +941,17 @@ def main(stdscr):
                 run_log_popup(stdscr, 'Backup Log', 'cat /tmp/stacks_backup.log 2>/dev/null || echo "No log found"')
 
         elif tab == 6:  # Build
-            if k == ord('g') or k == ord('G'):
+            if k in (ord('n'), ord('N'), 10, 13):
+                curses.endwin()
+                os.system(f'{STACKS_BIN} build')
+                input('\nPress Enter to return to menu...')
+                stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+            elif k == ord('g') or k == ord('G'):
                 run_log_popup(stdscr, 'Gen Dynamics', f'{STACKS_BIN} gen dynamics')
             elif k == ord('i') or k == ord('I'):
                 run_log_popup(stdscr, 'Gen Inject', f'python3 /usr/local/lib/stacks_gen_gi.py {CONF_DIR}/global_inject.conf {STACKS_DIR}')
+            elif k == ord('d') or k == ord('D'):
+                run_log_popup(stdscr, 'Gen ALL dynamics', f'python3 /usr/local/lib/stacks_gen_dynamic.py all')
 
         elif tab == 7:  # Configs
             if k == curses.KEY_UP:
