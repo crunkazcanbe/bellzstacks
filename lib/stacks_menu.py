@@ -1379,18 +1379,20 @@ def draw_stacks_tab(win, h, w, stacks, sel, scroll):
                     elif 'kB' in sz_str: img_total += float(sz_str.replace('kB','')) / 1024
                 except: pass
         img_total_str = f'{img_total:.0f}MB' if img_total < 1024 else f'{img_total/1024:.1f}GB'
-        # Total memory for this stack
+        # Total memory for this stack - only containers in THIS stack
         stack_mem = 0.0
-        for cname, mem in app_data['mem_stats'].items():
-            # Check if this container belongs to this stack
-            if '/' in mem: 
-                try:
-                    used = mem.split('/')[0].strip()
-                    if 'MiB' in used: stack_mem += float(used.replace('MiB',''))
-                    elif 'GiB' in used: stack_mem += float(used.replace('GiB','')) * 1024
-                    elif 'KiB' in used: stack_mem += float(used.replace('KiB','')) / 1024
-                except: pass
-        # Only show mem if stack has running containers
+        try:
+            stack_content = open(s['file']).read()
+            stack_containers = set(re.findall(r'container_name:\s*(\S+)', stack_content))
+            for cname, mem in app_data['mem_stats'].items():
+                if cname in stack_containers and '/' in mem:
+                    try:
+                        used = mem.split('/')[0].strip()
+                        if 'MiB' in used: stack_mem += float(used.replace('MiB',''))
+                        elif 'GiB' in used: stack_mem += float(used.replace('GiB','')) * 1024
+                        elif 'KiB' in used: stack_mem += float(used.replace('KiB','')) / 1024
+                    except: pass
+        except: pass
         mem_str = f'{stack_mem:.0f}M' if running > 0 and stack_mem > 0 else ''
         if idx == sel:
             line = f'{name:<18} {running:>3}/{total:<3} {size_str:>5}  {img_total_str:>9}  {mem_str:>10}  {status}'
