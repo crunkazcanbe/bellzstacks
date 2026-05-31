@@ -1469,7 +1469,7 @@ def draw_containers_tab(win, h, w, containers, sel, scroll):
 def draw_stacks_tab(win, h, w, stacks, sel, scroll):
     try:
         win.addstr(3, 2, "[ A ] All-Stacks Actions", curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, f'{"STACK":<18} {"RUN/TOT":<8} {"FILE":<6} {"IMG":<8} {"RAM":<7} {"STATUS"}',
+        win.addstr(4, 2, f'{"STACK":<18} {"RUN/T":<8} {"KB":<6} {"IMG SIZE":<8} {"RAM":<7} {"STATUS"}',
                    curses.color_pair(C_YELLOW))
         win.addstr(5, 2, '─' * (w-4), curses.color_pair(C_DIM))
     except: pass
