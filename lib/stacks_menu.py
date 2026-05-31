@@ -1499,7 +1499,7 @@ def do_container_action(stdscr, container_name, stack_file, action):
 TABS = ['Containers', 'Stacks', 'Logs', 'Dynamics', 'Art', 'Backup', 'Build', 'Configs']
 
 def draw_containers_tab(win, h, w, containers, sel, scroll):
-    win.addstr(3, 2, f'{"NAME":<27} {"STATUS":<12} {"MEMORY":<19} {"SIZE":<9} {"IMAGE"}',
+    win.addstr(3, 2, f'{"NAME":<26} {"STATUS":<12} {"MEMORY":<19} {"SIZE":<9} {"IMAGE"}',
                curses.color_pair(C_ACCENT))
     win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
 
@@ -1770,6 +1770,7 @@ def main(stdscr):
     curses.curs_set(0)
     stdscr.nodelay(False)
     stdscr.timeout(1000)
+    curses.flushinp()  # clear any buffered keypresses on launch
     try: curses.mousemask(curses.ALL_MOUSE_EVENTS)
     except: pass
 
