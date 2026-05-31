@@ -3053,7 +3053,11 @@ elif [ "$COMMAND" == "scale" ]; then
 # ---------------------------------------------------------
 elif [ "$COMMAND" == "menu" ]; then
   printf "\e[?25h"
-  exec python3 /usr/local/lib/stacks_menu.py
+  if [[ " ${TARGET_ARGS[*]} " =~ " info " ]]; then
+    exec python3 /usr/local/lib/stacks_menu.py
+  else
+    exec python3 -W ignore /usr/local/lib/stacks_menu.py 2>/dev/null
+  fi
 
 # ---------------------------------------------------------
 # COMMAND BRANCH: PROXY (traefik.enable toggle)

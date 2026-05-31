@@ -832,8 +832,8 @@ networks:
         try:
             for line in open(os.path.join(CONF_DIR, "stacks.conf")):
                 line = line.strip()
-                if line.startswith("BUILD_DESC_FILE="): desc_file = line.split("=",1)[1].strip('"\ ')
-                if line.startswith("BUILD_DEFAULT_DESC="): default_desc = line.split("=",1)[1].strip('"\ ')
+                if line.startswith("BUILD_DESC_FILE="): desc_file = line.split("=",1)[1].strip('" ')
+                if line.startswith("BUILD_DEFAULT_DESC="): default_desc = line.split("=",1)[1].strip('" ')
         except: pass
         # Look up service in descriptions file
         if desc_file and os.path.exists(desc_file):
@@ -982,7 +982,7 @@ networks:
         desc_file = ""
         for line in open(os.path.join(CONF_DIR, "stacks.conf")):
             if line.strip().startswith("BUILD_DESC_FILE="): 
-                desc_file = line.split("=",1)[1].strip('"\ ')
+                desc_file = line.split("=",1)[1].strip('" ')
         if desc_file and os.path.exists(desc_file):
             existing = open(desc_file).read()
             if f"\n{svc_name}\n" not in existing and not existing.startswith(svc_name):
@@ -1616,20 +1616,23 @@ def draw_logs_tab(win, h, w, log_lines, sel, scroll):
         win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
         import glob as _glob
         _log_dir = '/srv/stacks'
-        sources = [(f.split('/')[-1], f'cat {f}') for f in sorted(_glob.glob(f'{_log_dir}/stacks_*.log'))]
-        if not sources: sources = [('No logs found', 'echo No stacks logs found')]
+        sources = [(f.split('/')[-1], f'cat {f}', f) for f in sorted(_glob.glob(f'{_log_dir}/stacks_*.log'))]
+        if not sources: sources = [('No logs found', 'echo No stacks logs found', '')]
         visible = h - 7
-        for i, (label, _) in enumerate(sources):
+        for i, (label, _, fpath) in enumerate(sources):
             y = 5 + i
             if y >= h - 2: break
+            try: fsize = f"{os.path.getsize(fpath)//1024}K" if fpath else ""
+            except: fsize = ""
+            line = f"{label:<35} {fsize:>6}"
             if i == sel:
-                try: win.addstr(y, 2, f"  ▶  {label:<30}", curses.color_pair(C_SELECTED))
+                try: win.addstr(y, 2, f"  ▶  {line}", curses.color_pair(C_SELECTED))
                 except: pass
             else:
-                try: win.addstr(y, 2, f"     {label:<30}", curses.color_pair(C_NORMAL))
+                try: win.addstr(y, 2, f"     {line}", curses.color_pair(C_NORMAL))
                 except: pass
     except: pass
-    return sources
+    return [(l,c) for l,c,_ in sources]
 
 def draw_dynamics_tab(win, h, w, sel):
     try:
@@ -1641,11 +1644,14 @@ def draw_dynamics_tab(win, h, w, sel):
             y = 5 + i
             if y >= h-2: break
             label = os.path.basename(f)
+            try: fsize = f"{os.path.getsize(f)//1024}K"
+            except: fsize = ""
+            line = f"{label:<40} {fsize:>6}"
             if i == sel:
-                try: win.addstr(y, 2, f"  ▶  {label:<50}", curses.color_pair(C_SELECTED))
+                try: win.addstr(y, 2, f"  ▶  {line}", curses.color_pair(C_SELECTED))
                 except: pass
             else:
-                try: win.addstr(y, 2, f"     {label:<50}", curses.color_pair(C_NORMAL))
+                try: win.addstr(y, 2, f"     {line}", curses.color_pair(C_NORMAL))
                 except: pass
         return files
     except: return []
@@ -1739,15 +1745,23 @@ CONFIG_FILES = [
 ]
 
 def draw_configs_tab(win, h, w, sel):
-
-    win.addstr(3, 2, 'CONFIGS', curses.color_pair(C_ACCENT))
-    win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
-    for i, (label, _) in enumerate(CONFIG_FILES):
+    try:
+        win.addstr(3, 2, 'CONFIGS', curses.color_pair(C_ACCENT))
+        win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
+    except: pass
+    for i, (label, fname) in enumerate(CONFIG_FILES):
         y = 6 + i
+        if y >= win.getmaxyx()[0]-2: break
+        fpath = os.path.join(CONF_DIR, fname)
+        try: fsize = f"{os.path.getsize(fpath)//1024}K"
+        except: fsize = ""
+        line = f"{label:<30} {fsize:>6}"
         if i == sel:
-            win.addstr(y, 2, f'  {label:<30}', curses.color_pair(C_SELECTED))
+            try: win.addstr(y, 2, f"  ▶  {line}", curses.color_pair(C_SELECTED))
+            except: pass
         else:
-            win.addstr(y, 2, f'  {label:<30}', curses.color_pair(C_NORMAL))
+            try: win.addstr(y, 2, f"     {line}", curses.color_pair(C_NORMAL))
+            except: pass
 
 # ── Main TUI ─────────────────────────────────────────────────────────────────
 def main(stdscr):
