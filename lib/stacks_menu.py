@@ -207,6 +207,8 @@ def run_log_popup(stdscr, title, cmd):
     pw = min(w-6,70); ph=7; py=(h-ph)//2; px=(w-pw)//2
     popup = curses.newwin(ph,pw,py,px)
     popup.nodelay(True)
+    try: curses.mousemask(0)
+    except: pass
     bar_w=pw-6; pct=0; frame=0
     spinner="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     def draw(done=False):
@@ -264,6 +266,8 @@ def run_sequence_popup(stdscr, title, steps):
     pw=min(w-6,70); ph=9; py=(h-ph)//2; px=(w-pw)//2
     popup=curses.newwin(ph,pw,py,px)
     popup.nodelay(True)
+    try: curses.mousemask(0)
+    except: pass
     bar_w=pw-6; frame=0; total=len(steps)
     spinner="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     last_log=[""]
@@ -327,7 +331,7 @@ def run_sequence_popup(stdscr, title, steps):
                 draw(i, slabel)
                 _t.sleep(0.1)
                 k = popup.getch()
-                if k in (27, ord("q"), ord("Q")):
+                if k == 27:  # ESC only - ignore touch/mouse
                     proc.terminate(); cancelled=True; break
         except KeyboardInterrupt: proc.terminate(); cancelled=True
         proc.wait()
