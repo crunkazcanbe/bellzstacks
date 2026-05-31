@@ -1024,6 +1024,15 @@ networks:
                          f"docker compose -f {fpath} up -d {svc_name}")
 
     # Done
+    # Auto-sync descriptions and all_services.txt
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location("stacks_sync", "/usr/local/lib/stacks_sync.py")
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        mod.main()
+    except: pass
+
     pct[0] = 100
     popup.clear()
     draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-4]} ")
@@ -2078,7 +2087,6 @@ def main(stdscr):
         elif tab == 7:  # Configs
             if k == curses.KEY_UP:
                 cfg_sel = max(0, cfg_sel - 1)
-            elif k == curses.KEY_DOWN:
             elif k == curses.KEY_DOWN: cfg_sel = min(len(get_config_items())-1, cfg_sel+1)
             elif k in (10, 13):
                 label, fpath, is_dir = get_config_items()[cfg_sel]

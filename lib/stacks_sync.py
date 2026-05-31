@@ -53,7 +53,11 @@ def sync_descriptions(stack_name, services, default_desc):
     
     added = 0
     for svc, img in services:
-        if not re.search(rf"^{re.escape(svc)}\s*$", existing, re.MULTILINE):
+        # Normalize - treat dash and underscore as same
+        svc_norm = svc.replace("-","_")
+        exists = re.search(rf"^{re.escape(svc)}\s*$", existing, re.MULTILINE)
+        exists_norm = re.search(rf"^{re.escape(svc_norm)}\s*$", existing, re.MULTILINE)
+        if not exists and not exists_norm:
             existing += f"\n{svc}\n# {default_desc}\n"
             added += 1
     
