@@ -571,6 +571,8 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
                     if y >= ph-3: break
                     idx = scroll[0] + i
                     pull = item.get("pull","")
+                    # Skip helm/kubectl install strings
+                    if pull.startswith("helm ") or pull.startswith("kubectl "): continue
                     pulls = human_num(item.get("pulls","") or item.get("pull_count",""))
                     stars = human_num(item.get("stars","") or item.get("star_count",""))
                     # Image size from local cache
