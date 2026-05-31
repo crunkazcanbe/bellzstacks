@@ -83,10 +83,13 @@ def get_stacks():
             except: total = 0
             try: fsize = os.path.getsize(path) // 1024
             except: fsize = 0
+            # Get images used by this stack
+            images_used = re.findall(r'^    image:\s*(\S+)', open(path).read(), re.MULTILINE)
             stacks.append({
                 'name': name, 'running': running,
                 'stopped': stopped, 'total': total,
-                'file': path, 'size_kb': fsize
+                'file': path, 'size_kb': fsize,
+                'images': images_used
             })
     except: pass
     return stacks
@@ -1361,16 +1364,41 @@ def draw_stacks_tab(win, h, w, stacks, sel, scroll):
 
         size_kb = s.get('size_kb', 0)
         size_str = f'{size_kb}K' if size_kb < 1000 else f'{size_kb//1000}M'
-        line = f'{name:<18} {running:>3}/{total:<3} {size_str:>5}  {status}'
+        # Total image size for this stack
+        img_total = 0
+        for img in s.get('images', []):
+            sz_str = app_data['img_sizes'].get(img, '')
+            if sz_str:
+                try:
+                    if 'GB' in sz_str: img_total += float(sz_str.replace('GB','')) * 1024
+                    elif 'MB' in sz_str: img_total += float(sz_str.replace('MB',''))
+                    elif 'kB' in sz_str: img_total += float(sz_str.replace('kB','')) / 1024
+                except: pass
+        img_total_str = f'{img_total:.0f}MB' if img_total < 1024 else f'{img_total/1024:.1f}GB'
+        # Total memory for this stack
+        stack_mem = 0.0
+        for cname, mem in app_data['mem_stats'].items():
+            # Check if this container belongs to this stack
+            if '/' in mem: 
+                try:
+                    used = mem.split('/')[0].strip()
+                    if 'MiB' in used: stack_mem += float(used.replace('MiB',''))
+                    elif 'GiB' in used: stack_mem += float(used.replace('GiB','')) * 1024
+                    elif 'KiB' in used: stack_mem += float(used.replace('KiB','')) / 1024
+                except: pass
+        # Only show mem if stack has running containers
+        mem_str = f'{stack_mem:.0f}M' if running > 0 and stack_mem > 0 else ''
         if idx == sel:
+            line = f'{name:<18} {running:>3}/{total:<3} {size_str:>5}  {img_total_str:>9}  {mem_str:>10}  {status}'
             try: win.addstr(y, 2, line[:w-4], curses.color_pair(C_SELECTED))
             except: pass
         else:
             try:
-                win.addstr(y, 2, f'{name:<18} {running:>3}/{total:<3} {size_str:>5}  ',
-                          curses.color_pair(C_NORMAL))
-                win.addstr(y, 2+len(f'{name:<18} {running:>3}/{total:<3} {size_str:>5}  '),
-                          status[:w-4], curses.color_pair(color))
+                win.addstr(y, 2, f'{name:<18} {running:>3}/{total:<4}', curses.color_pair(C_NORMAL))
+                win.addstr(y, 27, f'{size_str:>5}', curses.color_pair(C_DIM))
+                win.addstr(y, 33, f'{img_total_str:>9}', curses.color_pair(C_CYAN if img_total > 0 else C_DIM))
+                win.addstr(y, 43, f'{mem_str:>10}', curses.color_pair(C_YELLOW if mem_str else C_DIM))
+                win.addstr(y, 54, f'  {status}', curses.color_pair(color))
             except: pass
 
 def draw_logs_tab(win, h, w, log_lines, sel, scroll):
