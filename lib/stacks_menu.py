@@ -332,9 +332,8 @@ def run_sequence_popup(stdscr, title, steps):
                 draw(i, slabel)
                 _t.sleep(0.1)
                 k = popup.getch()
-                if k == 27:  # ESC only - ignore touch/mouse
                 if k == curses.KEY_MOUSE: continue
-                if k in (27, ord("q"), ord("Q")):
+                if k == 27: proc.terminate(); cancelled=True; break
                     proc.terminate(); cancelled=True; break
         except KeyboardInterrupt: proc.terminate(); cancelled=True
         proc.wait()
