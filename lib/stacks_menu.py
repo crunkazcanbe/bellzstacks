@@ -328,6 +328,9 @@ def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
         curses.curs_set(1)
         # Manual input loop - ignores resize/mouse events
         val = []
+        popup.nodelay(True)
+        # Drain all buffered keys
+        while popup.getch() != -1: pass
         popup.nodelay(False)
         popup.timeout(-1)
         while True:
@@ -711,19 +714,19 @@ def run_build_wizard(stdscr, new_stack=False):
     def inp(prompt, default=""):
         frame[0]+=1
         curses.flushinp()
-        import time as _t; _t.sleep(0.05)
+        import time as _t; _t.sleep(0.15)
         return _bw_input(popup, pw, ph, prompt, default, bar_w, pct[0], title, spinner, frame[0])
 
     def sel(prompt, items):
         frame[0]+=1
         curses.flushinp()
-        import time as _t; _t.sleep(0.05)
+        import time as _t; _t.sleep(0.15)
         return _bw_select(popup, pw, ph, prompt, items, bar_w, pct[0], title, spinner, frame[0])
 
     def yn(prompt, default="n"):
         frame[0]+=1
         curses.flushinp()
-        import time as _t; _t.sleep(0.05)
+        import time as _t; _t.sleep(0.15)
         return _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct[0], title, spinner, frame[0])
 
     # State for all steps
@@ -1162,6 +1165,9 @@ def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
         curses.curs_set(1)
         # Manual input loop - ignores resize/mouse events
         val = []
+        popup.nodelay(True)
+        # Drain all buffered keys
+        while popup.getch() != -1: pass
         popup.nodelay(False)
         popup.timeout(-1)
         while True:
