@@ -473,9 +473,17 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
     Left/Right = switch registry tab
     Up/Down    = scroll results
     Enter      = select image
-    ESC        = cancel
+    ESC/Ctrl+C = cancel
     Returns selected image string or None.
     """
+    import concurrent.futures as _cf
+    import time as _t
+    try:
+        return _registry_search_inner(stdscr, term, bar_w, pct, title, spinner, frame)
+    except (KeyboardInterrupt, Exception):
+        return None
+
+def _registry_search_inner(stdscr, term, bar_w, pct, title, spinner, frame):
     import concurrent.futures as _cf
     import time as _t
 
