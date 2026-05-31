@@ -670,7 +670,7 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
             return None
 
 def run_build_wizard(stdscr, new_stack=False):
-    """Full curses build wizard - same questions as stacks build."""
+    """Full curses build wizard with back navigation."""
     import subprocess as _sp, glob as _gl, time as _t
     h, w = stdscr.getmaxyx()
     pw = min(w-4, 74); ph = 14
@@ -682,7 +682,6 @@ def run_build_wizard(stdscr, new_stack=False):
     frame = [0]
     pct = [0]
     title = "Build New Service"
-
     stdscr.clear(); stdscr.refresh()
 
     def status(msg, p):
@@ -701,31 +700,44 @@ def run_build_wizard(stdscr, new_stack=False):
         frame[0]+=1
         return _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct[0], title, spinner, frame[0])
 
-    # Step 1: Stack selection
-    status("Loading stacks...", 5)
-    _raw_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
+    # State for all steps
+    state = {
+        "target_stack": None, "stack_name": None,
+        "image": None, "svc_name": None,
+        "svc_ip": None, "svc_port": "8080",
+        "db_info": None, "redis_info": None,
+        "companion_info": None,
+    }
+
+    # Load stacks list
+    stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
                      if f.endswith(".yml") and not f.startswith("db_")])
-    stacks = []
-    for _s in _raw_stacks:
+    _raw = stacks[:]
+    stacks_display = []
+    for _s in _raw:
         try:
             _c = open(os.path.join(STACKS_DIR,_s+".yml")).read()
-            _n = len(re.findall(r"^  [a-zA-Z0-9_-]+:\s*$",_c,re.MULTILINE))
-            stacks.append(f"{_s:<20} [{_n} services]")
-        except: stacks.append(_s)
-    _stack_map = {s.split()[0]: s.split()[0] for s in stacks}
-    if new_stack:
-        # Create new stack
-        stack_name = inp("New stack name (e.g. srvs_3):", "srvs_3")
-        if not stack_name: return
-        fpath = os.path.join(STACKS_DIR, stack_name + ".yml")
-        if os.path.exists(fpath):
-            status(f"{stack_name}.yml already exists - adding to it", 5)
-        else:
-            # Create new stack from template
-            template = f"""name: {stack_name}
-# ══════════════════════════════════════════════════
-# {stack_name} stack
-# ══════════════════════════════════════════════════
+            _n = len(re.findall(r"^    container_name:", _c, re.MULTILINE))
+            stacks_display.append(f"{_s:<20} [{_n} svc]")
+        except: stacks_display.append(_s)
+
+    step = 0
+    STEPS = ["stack", "image", "name", "ip_port", "db", "redis", "companion", "start"]
+
+    while True:
+        current = STEPS[step] if step < len(STEPS) else "done"
+
+        if current == "stack":
+            pct[0] = 5
+            if new_stack:
+                result = inp("New stack name (e.g. srvs_3):", state.get("stack_name") or "srvs_3")
+                if result is None or result == "":
+                    return  # ESC on first question = close
+                state["stack_name"] = result
+                state["target_stack"] = result
+                fpath = os.path.join(STACKS_DIR, result + ".yml")
+                if not os.path.exists(fpath):
+                    template = f"name: {result}
 
 x-common: &common-caps
   restart: unless-stopped
@@ -738,138 +750,158 @@ services:
 networks:
   traefik_net:
     external: true
-"""
-            open(fpath, "w").write(template)
-            status(f"Created {stack_name}.yml", 8)
-        target_stack = stack_name
-        stacks.append(stack_name)
-    else:
-        target_stack_display = sel("Select target stack:", stacks)
-        if not target_stack_display: return
-        # Extract just the name - strip service count display
-        target_stack = target_stack_display.split()[0].strip()
+"
+                    open(fpath, "w").write(template)
+                stacks.append(result)
+                step += 1
+            else:
+                result = sel("Select target stack:", stacks_display)
+                if result is None:
+                    return  # ESC on first question = close
+                state["target_stack"] = result.split()[0].strip()
+                step += 1
 
-    # Step 2: Image search FIRST
-    search_term = inp("Search image (or type full image:tag to skip):", "")
-    if not search_term: return
-    image = None
-    if "/" in search_term or ":" in search_term:
-        image = search_term
-        pct[0] = 20
-    else:
-        image = registry_search_popup(stdscr, search_term, bar_w, pct[0], title, spinner, frame)
-        if not image: return
-        pct[0] = 20
+        elif current == "image":
+            pct[0] = 15
+            prev = state.get("image") or ""
+            search_term = inp("Image (full tag skips search, name to search):", prev.split("/")[-1].split(":")[0] if prev else "")
+            if search_term is None:
+                step = max(0, step-1); continue  # ESC = back
+            if not search_term:
+                continue
+            if "/" in search_term or ":" in search_term:
+                state["image"] = search_term
+                step += 1
+            else:
+                # Registry search - clears popup after
+                popup.clear(); popup.refresh()
+                stdscr.clear(); stdscr.refresh()
+                chosen = registry_search_popup(stdscr, search_term, bar_w, pct[0], title, spinner, frame)
+                # Recreate popup after registry search closes
+                popup = curses.newwin(ph, pw, py, px)
+                popup.keypad(True)
+                stdscr.clear(); stdscr.refresh()
+                if chosen:
+                    state["image"] = chosen
+                    step += 1
+                # If ESC in registry, stay on image step
 
-    # Step 3: Name - default to image basename
-    img_base = image.split("/")[-1].split(":")[0].lower()
-    svc_name = inp("Container name:", img_base)
-    if not svc_name: svc_name = img_base
-    pct[0] = 25
+        elif current == "name":
+            pct[0] = 25
+            img_base = state["image"].split("/")[-1].split(":")[0].lower() if state["image"] else ""
+            result = inp("Container name:", state.get("svc_name") or img_base)
+            if result is None:
+                step = max(0, step-1); continue  # ESC = back
+            state["svc_name"] = result or img_base
+            step += 1
 
+        elif current == "ip_port":
+            pct[0] = 35
+            # Auto-detect next IP
+            if not state.get("svc_ip"):
+                try:
+                    used = set()
+                    for f in _gl.glob(f"{STACKS_DIR}/*.yml"):
+                        for m in re.findall(r"192\.168\.1\.(\d+)", open(f).read()):
+                            used.add(int(m))
+                    state["svc_ip"] = "192.168.1." + str(next(x for x in range(200,254) if x not in used))
+                except: state["svc_ip"] = "192.168.1.200"
+            ip = inp("Service IP (192.168.1.x):", state["svc_ip"])
+            if ip is None:
+                step = max(0, step-1); continue
+            state["svc_ip"] = ip
+            port = inp("Service port:", state.get("svc_port","8080"))
+            if port is None:
+                step = max(0, step-1); continue
+            state["svc_port"] = port
+            step += 1
 
-    # Step 4: IP and port
-    try:
-        used = set()
-        for f in __import__("glob").glob(f"{STACKS_DIR}/*.yml"):
-            for m in re.findall(r"192\.168\.1\.(\d+)", open(f).read()):
-                used.add(int(m))
-        next_ip_val = "192.168.1." + str(next(x for x in range(200,254) if x not in used))
-    except: next_ip_val = "192.168.1.200"
+        elif current == "db":
+            pct[0] = 50
+            needs_db = yn("Does this service need a database?", "n")
+            if needs_db is None:
+                step = max(0, step-1); continue
+            if needs_db == "y":
+                db_type = sel("Database type:", ["postgres","mysql","mariadb","mongo","redis","none"])
+                if db_type is None:
+                    continue
+                if db_type and db_type != "none":
+                    db_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
+                                       if re.match(r"db_\d+\.yml", f)])
+                    db_target = sel("Which DB stack:", db_stacks)
+                    if db_target:
+                        db_name = inp("DB container name:", f"{state['svc_name']}-{db_type}")
+                        if db_name is None: continue
+                        db_pass = inp("DB password:", "changeme")
+                        if db_pass is None: continue
+                        db_db = inp("DB name:", state["svc_name"].replace("-","_"))
+                        if db_db is None: continue
+                        state["db_info"] = {"type":db_type,"name":db_name,"pass":db_pass,"db":db_db,"stack":db_target}
+            step += 1
 
-    svc_ip   = inp("Service IP (192.168.1.x):", next_ip_val)
-    svc_port = inp("Service port:", "8080")
-    container_name = svc_name
+        elif current == "redis":
+            pct[0] = 60
+            if not (state.get("db_info") and state["db_info"].get("type")=="redis"):
+                needs_redis = yn("Does this service need Redis?", "n")
+                if needs_redis is None:
+                    step = max(0, step-1); continue
+                if needs_redis == "y":
+                    redis_name = inp("Redis container name:", f"{state['svc_name']}-redis")
+                    if redis_name is None: continue
+                    redis_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
+                                          if re.match(r"db_\d+\.yml", f)])
+                    redis_stack = sel("Which DB stack for Redis:", redis_stacks)
+                    state["redis_info"] = {"name":redis_name,"stack":redis_stack}
+            step += 1
 
-    pct[0] = 40
+        elif current == "companion":
+            pct[0] = 70
+            needs_comp = yn("Does this service need a companion container?", "n")
+            if needs_comp is None:
+                step = max(0, step-1); continue
+            if needs_comp == "y":
+                comp_name = inp("Companion name:", f"{state['svc_name']}-worker")
+                if comp_name is None: continue
+                comp_img_term = inp("Companion image (or search):", "")
+                if comp_img_term is None: continue
+                if "/" in comp_img_term or ":" in comp_img_term:
+                    comp_img = comp_img_term
+                else:
+                    popup.clear(); popup.refresh()
+                    stdscr.clear(); stdscr.refresh()
+                    comp_img = registry_search_popup(stdscr, comp_img_term, bar_w, pct[0], title, spinner, frame)
+                    popup = curses.newwin(ph, pw, py, px)
+                    popup.keypad(True)
+                    stdscr.clear(); stdscr.refresh()
+                if comp_img:
+                    comp_stack = sel("Which stack for companion:", stacks)
+                    state["companion_info"] = {"name":comp_name,"image":comp_img,"stack":comp_stack or state["target_stack"]}
+            step += 1
 
-    # Step 5: Database
-    db_info = None
-    needs_db = yn("Does this service need a database?", "n")
-    if needs_db == "y":
-        db_type = sel("Database type:", ["postgres","mysql","mariadb","mongo","redis","none"])
-        if db_type and db_type != "none":
-            db_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
-                               if re.match(r"db_\d+\.yml", f)])
-            db_target = sel("Which DB stack:", db_stacks)
-            if db_target:
-                db_name = inp("DB container name:", f"{svc_name}-{db_type}")
-                db_pass = inp("DB password:", "changeme")
-                db_db   = inp("DB name:", svc_name.replace("-","_"))
-                db_info = {"type":db_type,"name":db_name,"pass":db_pass,
-                          "db":db_db,"stack":db_target}
-    pct[0] = 55
+        elif current == "start" or step >= len(STEPS):
+            break
 
-    # Step 6: Redis
-    redis_info = None
-    if not (db_info and db_info.get("type")=="redis"):
-        needs_redis = yn("Does this service need Redis?", "n")
-        if needs_redis == "y":
-            redis_name  = inp("Redis container name:", f"{svc_name}-redis")
-            redis_stacks = sorted([f.replace(".yml","") for f in os.listdir(STACKS_DIR)
-                                   if re.match(r"db_\d+\.yml", f)])
-            redis_stack = sel("Which DB stack for Redis:", redis_stacks)
-            redis_info = {"name":redis_name,"stack":redis_stack}
-    pct[0] = 65
+    # ── Build scaffold ───────────────────────────────────────────────────
+    svc_name = state["svc_name"]
+    image = state["image"]
+    svc_ip = state["svc_ip"]
+    svc_port = state["svc_port"]
+    target_stack = state["target_stack"]
+    db_info = state["db_info"]
+    redis_info = state["redis_info"]
+    companion_info = state["companion_info"]
 
-    # Step 7: Companion
-    companion_info = None
-    needs_comp = yn("Does this service need a companion container?", "n")
-    if needs_comp == "y":
-        comp_name  = inp("Companion name:", f"{svc_name}-worker")
-        comp_img   = inp("Companion image:", f"{svc_name}-worker:latest")
-        comp_stack = sel("Which stack for companion:", stacks)
-        if comp_stack:
-            companion_info = {"name":comp_name,"image":comp_img,"stack":comp_stack}
-    pct[0] = 75
-
-    # Step 8: Build scaffold using build.conf
     status("Building compose scaffold...", 80)
     import json as _json
     try: cfg = _json.load(open(os.path.join(CONF_DIR, "build.conf")))
     except: cfg = {}
     container_name = svc_name
-
-    # Load description from descriptions file or use default
-    def load_service_desc(svc):
-        # Read stacks.conf for desc file path and default
-        desc_file = ""
-        default_desc = "A powerful service running on StacksServer. Edit this description in the descriptions config."
-        try:
-            for line in open(os.path.join(CONF_DIR, "stacks.conf")):
-                line = line.strip()
-                if line.startswith("BUILD_DESC_FILE="): desc_file = line.split("=",1)[1].strip('" ')
-                if line.startswith("BUILD_DEFAULT_DESC="): default_desc = line.split("=",1)[1].strip('" ')
-        except: pass
-        # Look up service in descriptions file
-        if desc_file and os.path.exists(desc_file):
-            try:
-                content = open(desc_file).read()
-                # Find service name followed by description lines
-                import re as _re
-                m = _re.search(rf"^{_re.escape(svc)}\s*\n((?:#[^\n]*\n)+)", content, _re.MULTILINE)
-                if m:
-                    return m.group(1).rstrip()
-            except: pass
-        return f"# {default_desc}"
-
-    def count_services_in_stack(fpath):
-        """Count existing services by container_name entries."""
-        try:
-            c = open(fpath).read()
-            return len(re.findall(r"^    container_name:", c, re.MULTILINE)) + 1
-        except: return 1
-
-    svc_num = count_services_in_stack(os.path.join(STACKS_DIR, target_stack + ".yml"))
-    svc_desc = load_service_desc(svc_name)
-
     net_name = container_name.replace("-","_") + "_net"
     cpuset = cfg.get("cpuset","0-15")
     cpu_shares = cfg.get("cpu_shares",4096)
     stop_grace = cfg.get("stop_grace_period","120s")
     stop_signal = cfg.get("stop_signal","SIGTERM")
-    privileged = str(cfg.get("privileged",False)).lower()
-    user = cfg.get("user","0:0")
+    restart_pol = cfg.get("restart","unless-stopped")
     dns_list = cfg.get("dns",["192.168.1.114","8.8.8.8"])
     extra_env = cfg.get("extra_env",["TZ=America/New_York"])
     extra_vols = cfg.get("extra_volumes",[])
@@ -891,12 +923,38 @@ networks:
     pids_limit = cfg.get("deploy_pids_limit",1000)
     mem_res = cfg.get("deploy_memory_reservation","100M")
     domain = "example.com"
+
+    def count_services_in_stack(fpath):
+        try:
+            c = open(fpath).read()
+            return len(re.findall(r"^    container_name:", c, re.MULTILINE)) + 1
+        except: return 1
+
+    def load_service_desc(svc):
+        default_desc = "A powerful service running on StacksServer. Edit this description in the descriptions config."
+        try:
+            for line in open(os.path.join(CONF_DIR, "stacks.conf")):
+                l = line.strip()
+                if l.startswith("BUILD_DEFAULT_DESC="): default_desc = l.split("=",1)[1].strip('" ')
+        except: pass
+        desc_dir = os.path.expanduser("~/.config/stacks/descriptions")
+        desc_file = os.path.join(desc_dir, f"{target_stack}.conf")
+        if os.path.exists(desc_file):
+            try:
+                content = open(desc_file).read()
+                m = re.search(rf"^{re.escape(svc)}\s*\n((?:#[^\n]*\n)+)", content, re.MULTILINE)
+                if m: return m.group(1).rstrip()
+            except: pass
+        return f"# {default_desc}"
+
+    svc_num = count_services_in_stack(os.path.join(STACKS_DIR, target_stack + ".yml"))
+    svc_desc = load_service_desc(svc_name)
+
     bl = []
     bl.append(f"  # ---------------------------------------------------------")
     bl.append(f"  # {svc_num}. {container_name.upper()} 🐳")
     for desc_line in svc_desc.split("\n"):
-        if desc_line.strip():
-            bl.append(f"  {desc_line}" if not desc_line.startswith("  ") else desc_line)
+        if desc_line.strip(): bl.append(f"  {desc_line}" if not desc_line.startswith("  ") else desc_line)
     bl.append(f"  # ---------------------------------------------------------")
     bl.append(f"  {svc_name}:")
     if cfg.get("use_common_caps",True): bl.append("    <<: *common-caps")
@@ -908,8 +966,7 @@ networks:
     bl.append(f"    cpu_shares: {cpu_shares}")
     bl.append(f"    stop_grace_period: {stop_grace}")
     bl.append(f"    stop_signal: {stop_signal}")
-    bl.append(f"    privileged: {privileged}")
-    bl.append(f'    user: "{user}"')
+    bl.append(f"    restart: {restart_pol}")
     if do_blkio: bl.append(f"    blkio_config: {{weight: 500, device_read_bps: [{{path: /dev/nvme0n1, rate: {blkio_read}}}], device_write_bps: [{{path: /dev/nvme0n1, rate: {blkio_write}}}]}}")
     if do_ulimits: bl.append("    ulimits: {memlock: {soft: -1, hard: -1}, nofile: {soft: 65535, hard: 65535}, nproc: 65535}")
     if do_deploy: bl.append(f"    deploy: {{placement: {{constraints: [node.labels.priority == high]}}, resources: {{limits: {{memory: {mem_limit}, cpus: '{cpu_limit}', pids: {pids_limit}}}, reservations: {{memory: {mem_res}, cpus: '0.05'}}}}}}")
@@ -940,52 +997,21 @@ networks:
     for el in extra_labels: bl.append(f'      - "{el}"')
     block = "\n".join(bl) + "\n"
 
-
     # Inject into stack
     fpath = os.path.join(STACKS_DIR, target_stack + ".yml")
     try:
         fcontent = open(fpath).read()
         if "##STACKS_ART_START_FOOTER" in fcontent:
-            fcontent = fcontent.replace("##STACKS_ART_START_FOOTER",
-                                       block + "\n##STACKS_ART_START_FOOTER", 1)
+            fcontent = fcontent.replace("##STACKS_ART_START_FOOTER", block + "\n##STACKS_ART_START_FOOTER", 1)
         else:
-            lines = fcontent.splitlines(keepends=True)
-            insert = len(lines)
-            for i in range(len(lines)-1,-1,-1):
-                if not lines[i].startswith("#") and lines[i].strip():
+            lines_f = fcontent.splitlines(keepends=True)
+            insert = len(lines_f)
+            for i in range(len(lines_f)-1,-1,-1):
+                if not lines_f[i].startswith("#") and lines_f[i].strip():
                     insert = i+1; break
-            lines.insert(insert, block+"\n")
-            fcontent = "".join(lines)
+            lines_f.insert(insert, block+"\n")
+            fcontent = "".join(lines_f)
         open(fpath,"w").write(fcontent)
-    except Exception as _inje:
-        pass
-    # Log the build
-    try:
-        import datetime as _dt
-        with open("/srv/stacks/stacks_build.log", "a") as _bl:
-            _bl.write(f"\n=== Wizard Build: {_dt.datetime.now()} ===\n")
-            _bl.write(f"  Service:    {svc_name}\n")
-            _bl.write(f"  Image:      {image}\n")
-            _bl.write(f"  Stack:      {target_stack}\n")
-            _bl.write(f"  IP:         {svc_ip}\n")
-            _bl.write(f"  Port:       {svc_port}\n")
-            if db_info: _bl.write(f"  DB:         {db_info.get('type')} ({db_info.get('name')})\n")
-            if redis_info: _bl.write(f"  Redis:      {redis_info.get('name')}\n")
-            _bl.write(f"  Injected:   {fpath}\n")
-    except: pass
-
-    # Write new service + description to descriptions file for future editing
-    try:
-        desc_file = ""
-        for line in open(os.path.join(CONF_DIR, "stacks.conf")):
-            if line.strip().startswith("BUILD_DESC_FILE="): 
-                desc_file = line.split("=",1)[1].strip('" ')
-        if desc_file and os.path.exists(desc_file):
-            existing = open(desc_file).read()
-            if f"\n{svc_name}\n" not in existing and not existing.startswith(svc_name):
-                with open(desc_file, "a") as df:
-                    df.write(f"\n{svc_name}\n{svc_desc}\n")
-
     except Exception as e:
         import traceback
         err = traceback.format_exc()
@@ -1002,28 +1028,38 @@ networks:
         popup.getch()
         return
 
-    pct[0] = 90
+    # Log the build
+    try:
+        import datetime as _dt
+        with open("/srv/stacks/stacks_build.log", "a") as _bl:
+            _bl.write(f"\n=== Wizard Build: {_dt.datetime.now()} ===\n")
+            _bl.write(f"  Service:    {svc_name}\n")
+            _bl.write(f"  Image:      {image}\n")
+            _bl.write(f"  Stack:      {target_stack}\n")
+            _bl.write(f"  IP:         {svc_ip}\n")
+            _bl.write(f"  Port:       {svc_port}\n")
+            if db_info: _bl.write(f"  DB:         {db_info.get('type')} ({db_info.get('name')})\n")
+            _bl.write(f"  Injected:   {fpath}\n")
+    except: pass
 
-    # Step 9: Start service?
-    start_action = sel("Start now?", [
-        f"Start just {container_name}",
-        f"Start whole stack: {target_stack}",
-        f"Pull image only: {image}",
-        "Don't start yet",
-    ])
-    pct[0] = 95
+    # Write to per-stack descriptions file
+    try:
+        default_desc = "A powerful service running on StacksServer. Edit this description."
+        for line in open(os.path.join(CONF_DIR, "stacks.conf")):
+            l = line.strip()
+            if l.startswith("BUILD_DEFAULT_DESC="): default_desc = l.split("=",1)[1].strip('" ')
+        desc_dir = os.path.expanduser("~/.config/stacks/descriptions")
+        os.makedirs(desc_dir, exist_ok=True)
+        desc_file = os.path.join(desc_dir, f"{target_stack}.conf")
+        try: existing = open(desc_file).read()
+        except: existing = f"# {target_stack} — Service Descriptions\n# Edit the description under each service name.\n#\n"
+        import re as _re2
+        if not _re2.search(rf"^{_re2.escape(svc_name)}\s*$", existing, _re2.MULTILINE):
+            entry = f"\n{svc_name}\n# {default_desc}\n"
+            with open(desc_file, "a") as df: df.write(entry)
+    except: pass
 
-    if start_action and "Don't" not in start_action:
-        if "whole stack" in start_action:
-            run_log_popup(stdscr, f"Up {target_stack}", f"{STACKS_BIN} up {target_stack}")
-        elif "Pull image" in start_action:
-            run_log_popup(stdscr, f"Pull {image}", f"docker pull {image}")
-        else:
-            run_log_popup(stdscr, f"Start {container_name}",
-                         f"docker compose -f {fpath} up -d {svc_name}")
-
-    # Done
-    # Auto-sync descriptions and all_services.txt
+    # Auto-sync
     try:
         import importlib.util as _ilu
         spec = _ilu.spec_from_file_location("stacks_sync", "/usr/local/lib/stacks_sync.py")
@@ -1032,6 +1068,23 @@ networks:
         mod.main()
     except: pass
 
+    # Step 9: Start?
+    pct[0] = 95
+    start_action = sel("Start now?", [
+        f"Start just {container_name}",
+        f"Start whole stack: {target_stack}",
+        f"Pull image only: {image}",
+        "Don't start yet",
+    ])
+    if start_action and "Don't" not in start_action:
+        if "whole stack" in start_action:
+            run_log_popup(stdscr, f"Up {target_stack}", f"{STACKS_BIN} up {target_stack}")
+        elif "Pull image" in start_action:
+            run_log_popup(stdscr, f"Pull {image}", f"docker pull {image}")
+        else:
+            run_log_popup(stdscr, f"Start {container_name}", f"docker compose -f {fpath} up -d {svc_name}")
+
+    # Done
     pct[0] = 100
     popup.clear()
     draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-4]} ")
@@ -1048,7 +1101,6 @@ networks:
     except: pass
     popup.refresh()
     popup.getch()
-
 
 def _bw_input(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame):
     """Single line text input inside popup."""
