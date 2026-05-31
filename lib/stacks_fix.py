@@ -1856,6 +1856,81 @@ def main():
             pr(f"  {G}✔ No profiles: blocks found{X}")
         total += _prof_fixed
 
+
+
+    # ── Phase 0.1: Auto-name compose files ──────────────────────────────────
+    # Adds/fixes "name: stackname" at top of each compose file
+    if on(cfg.get("FIX_AUTO_NAME", "1")):
+        for f in files:
+            stack_name = _os.path.basename(f).replace('.yml','').replace('.yaml','')
+            lines = open(f).read().split('\n')
+            # Check if name: already correct at top
+            has_name = False
+            name_correct = False
+            for i, line in enumerate(lines[:5]):
+                if re.match(r'^name:\s*', line):
+                    has_name = True
+                    if line.strip() == f'name: {stack_name}':
+                        name_correct = True
+                    break
+            if not name_correct:
+                # Remove any existing name: line at top
+                lines = [l for l in lines if not re.match(r'^name:\s*', l)]
+                # Insert after any leading comment block
+                insert_at = 0
+                for i, line in enumerate(lines):
+                    if line.startswith('#'):
+                        insert_at = i + 1
+                    else:
+                        break
+                lines.insert(insert_at, f'name: {stack_name}')
+                open(f, 'w').write('\n'.join(lines))
+                pr(f"  {G}✔ Named {stack_name}{X}")
+                total += 1
+
+    # ── Phase 0.5: Corruption repair ────────────────────────────────────────
+    # Fixes known corruption patterns from label injection bugs:
+    # 1. Label lines injected into networks: block
+    # 2. HC test values leaked into blkio_config
+    _repair_changes = 0
+    for f in files:
+        content = open(f).read()
+        original = content
+        lines = content.split('\n')
+        result = []
+        in_networks = False
+
+        for line in lines:
+            # Track networks: block
+            if re.match(r'^networks:\s*$', line):
+                in_networks = True
+            elif re.match(r'^[a-zA-Z]', line) and not line.startswith(' '):
+                in_networks = False
+
+            # Remove label lines inside networks block
+            if in_networks and re.match(r'\s+- "(traefik\.|sablier\.)', line):
+                _repair_changes += 1
+                continue
+
+            # Fix HC test values leaked into blkio_config
+            if 'blkio_config' in line and ('NONE' in line or 'CMD' in line or 'CMD-SHELL' in line):
+                line = re.sub(
+                    r'device_read_bps:\s*\[.*?\]',
+                    'device_read_bps: [{path: /dev/nvme0n1, rate: 500mb}]',
+                    line
+                )
+                _repair_changes += 1
+
+            result.append(line)
+
+        content = '\n'.join(result)
+        if content != original:
+            open(f, 'w').write(content)
+            pr(f"  {G}✔ Repaired corruption in {_os.path.basename(f)}{X}")
+
+    if _repair_changes > 0:
+        total += _repair_changes
+    
     # ── Phase 1: auto-define missing networks/volumes (dynamic creators) ──
     if on(cfg["FIX_DEFINE_NETVOL"]):
         pr(f"\n{C}🌐 Network/Volume auto-define{X}")

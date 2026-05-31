@@ -23,9 +23,49 @@ DOMAIN="example.com"
 FIX_AUTO_SEARCH=1  # 1=registry search on image-pull failure during fix; 0=off
 
 # ── Load config if it exists ───────────────────────────────────────────────────
+
+# ==============================================================================
+# CONFIG REGISTRY — Add new options here, everything else is automatic
+# Format: _stacks_config_option "KEY" "DEFAULT" "Description"
+# ==============================================================================
+_stacks_config_option() {
+  local key="$1" default="$2" desc="$3"
+  # Add to auto-generator if not already there
+  if ! \grep -q "^${key}=" "$_CONF_DIR/stacks.conf" 2>/dev/null; then
+    echo "" >> "$_CONF_DIR/stacks.conf"
+    echo "# ${desc}" >> "$_CONF_DIR/stacks.conf"
+    echo "${key}=${default}" >> "$_CONF_DIR/stacks.conf"
+  fi
+}
+
+# ── Register all config options ───────────────────────────────────────────────
+_register_config_options() {
+  _stacks_config_option "FIX_AUTO_NAME"        "1"   "Auto-name compose files with stack name"
+  _stacks_config_option "FIX_AUTO_NETWORKS"    "traefik_net" "Networks to auto-inject into services"
+  _stacks_config_option "FIX_HC_SKIP"          ""    "Space-separated containers to skip healthcheck injection"
+  _stacks_config_option "LOCKED_IPS"           ""    "Comma-separated IPs never reassigned by fix"
+  _stacks_config_option "SCALE_SKIP_CONTAINERS" ""   "Space-separated containers skipped by stacks scale on"
+  _stacks_config_option "PROXY_SKIP_CONTAINERS" ""   "Space-separated containers skipped by stacks proxy on"
+  _stacks_config_option "SCALE_AUTO_GROUP"     "1"   "Use stack prefix as sablier group name"
+  _stacks_config_option "FIX_REPLACE_BROKEN_HC" "1"  "Replace actively-failing healthchecks"
+  _stacks_config_option "FIX_CONVERT_NAMED_TO_BIND" "1" "Convert named volumes to bind mounts"
+  _stacks_config_option "FIX_AUTO_DEPENDS_ON"  "1"   "Auto-add depends_on for linked services"
+  _stacks_config_option "INJECT_STOP_GRACE"    "1"   "Inject stop_grace_period into anchor"
+  _stacks_config_option "INJECT_LOGGING"       "1"   "Inject logging config into anchor"
+  _stacks_config_option "INJECT_RESTART"       "0"   "Inject restart policy into anchor"
+  _stacks_config_option "INJECT_DEPLOY"        "0"   "Inject deploy resource limits into services"
+  _stacks_config_option "INJECT_CPUSET"        "0"   "Inject CPU core pinning into services"
+  _stacks_config_option "INJECT_BLKIO"         "0"   "Inject block IO limits into services"
+  _stacks_config_option "INJECT_ULIMITS"       "0"   "Inject ulimits into services"
+}
+
 if [ -f "$STACKS_CONF" ]; then
   source "$STACKS_CONF"
 fi
+
+# Auto-add any missing config options then re-source
+_register_config_options 2>/dev/null || true
+if [ -f "$STACKS_CONF" ]; then source "$STACKS_CONF"; fi
 
 # ── Auto-generate missing config files ────────────────────────────────────────
 _CONF_DIR="~/.config/stacks"
