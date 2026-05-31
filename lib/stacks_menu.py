@@ -699,9 +699,9 @@ def run_build_wizard(stdscr, new_stack=False):
     title = "Build New Service"
     def update_title():
         nonlocal title
-        titles = ["Stack","Image","Name","IP/Port","Database","Redis","Companion","Start"]
+        titles = ["Stack","Image","Name","IP","Port","Database","Redis","Companion","Start"]
         t = titles[min(step, len(titles)-1)] if step < len(titles) else "Build"
-        title = f"Build [{step+1}/8] {t}"
+        title = f"Build [{step+1}/9] {t}"
     stdscr.refresh()
 
     def status(msg, p):
@@ -742,7 +742,7 @@ def run_build_wizard(stdscr, new_stack=False):
         except: stacks_display.append(_s)
 
     step = 0
-    STEPS = ["stack", "image", "name", "ip_port", "db", "redis", "companion", "start"]
+    STEPS = ["stack", "image", "name", "ip", "port", "db", "redis", "companion", "start"]
 
     while True:
         current = STEPS[step] if step < len(STEPS) else "done"
@@ -813,9 +813,8 @@ def run_build_wizard(stdscr, new_stack=False):
             state["svc_name"] = result or img_base
             step += 1
 
-        elif current == "ip_port":
+        elif current == "ip":
             pct[0] = 35
-            # Auto-detect next IP
             if not state.get("svc_ip"):
                 try:
                     used = set()
@@ -828,6 +827,10 @@ def run_build_wizard(stdscr, new_stack=False):
             if ip is None:
                 step = max(0, step-1); continue
             state["svc_ip"] = ip
+            step += 1
+
+        elif current == "port":
+            pct[0] = 40
             port = inp("Service port:", state.get("svc_port","8080"))
             if port is None:
                 step = max(0, step-1); continue
