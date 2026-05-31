@@ -642,6 +642,7 @@ def draw_art_tab(win, h, w):
             ("D", "Inject art into ALL dynamics"),
             ("X", "Strip art from ALL dynamics"),
             ("E", "Edit art.conf (art config)"),
+            ("R", "Repair ALL dynamic configs"),
             ("U", "Edit stack_urls.conf (URLs config)"),
         ]
         for i, (key, desc) in enumerate(actions):
@@ -874,8 +875,22 @@ def main(stdscr):
                 stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
             elif k in (ord('a'), ord('A')) and dyn_files:
                 fname = os.path.basename(dyn_files[sel]).replace('.yml','').replace('.yaml','')
-                run_log_popup(stdscr, f'Art inject: {fname}',
-                    f'{STACKS_BIN} art dynamic inject {dyn_files[sel]}')
+                dyn_actions = [
+                    ('🎨  Art Inject',  'dyn_art_inject'),
+                    ('🧹  Art Strip',   'dyn_art_strip'),
+                    ('🔧  Repair',      'dyn_repair'),
+                    ('✕  Cancel',      None),
+                ]
+                result = run_popup_action(stdscr, f'Dynamic: {fname[:20]}', dyn_actions)
+                if result and result[1] == 'dyn_art_inject':
+                    run_log_popup(stdscr, f'Art inject: {fname}',
+                        f'{STACKS_BIN} art dynamic inject {dyn_files[sel]}')
+                elif result and result[1] == 'dyn_art_strip':
+                    run_log_popup(stdscr, f'Art strip: {fname}',
+                        f'{STACKS_BIN} art dynamic strip {dyn_files[sel]}')
+                elif result and result[1] == 'dyn_repair':
+                    run_log_popup(stdscr, f'Repair: {fname}',
+                        f'python3 /usr/local/lib/stacks_repair_dynamic.py {dyn_files[sel]}')
         elif tab == 4:  # Art
             if k in (ord('i'), ord('I')):
                 run_log_popup(stdscr, 'Art inject ALL stacks', f'{STACKS_BIN} art inject all')
@@ -890,6 +905,9 @@ def main(stdscr):
                 curses.endwin()
                 os.system(f'{editor} {CONF_DIR}/art.conf')
                 stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+            elif k in (ord('r'), ord('R')):
+                run_log_popup(stdscr, 'Repair ALL dynamics',
+                    f'python3 /usr/local/lib/stacks_repair_dynamic.py {DYNAMICS_DIR}')
             elif k in (ord('u'), ord('U')):
                 editor = os.environ.get('EDITOR', 'nano')
                 curses.endwin()
