@@ -596,9 +596,6 @@ def registry_search_popup(stdscr, term, bar_w, pct, title, spinner, frame):
             popup.refresh()
         except: pass
 
-            popup.refresh()
-        except: pass
-
     frame = [0]
     draw(loading=True)
 
@@ -826,6 +823,39 @@ networks:
     try: cfg = _json.load(open(os.path.join(CONF_DIR, "build.conf")))
     except: cfg = {}
     container_name = svc_name
+
+    # Load description from descriptions file or use default
+    def load_service_desc(svc):
+        # Read stacks.conf for desc file path and default
+        desc_file = ""
+        default_desc = "A powerful service running on StacksServer. Edit this description in the descriptions config."
+        try:
+            for line in open(os.path.join(CONF_DIR, "stacks.conf")):
+                line = line.strip()
+                if line.startswith("BUILD_DESC_FILE="): desc_file = line.split("=",1)[1].strip('"\ ')
+                if line.startswith("BUILD_DEFAULT_DESC="): default_desc = line.split("=",1)[1].strip('"\ ')
+        except: pass
+        # Look up service in descriptions file
+        if desc_file and os.path.exists(desc_file):
+            try:
+                content = open(desc_file).read()
+                # Find service name followed by description lines
+                import re as _re
+                m = _re.search(rf"^{_re.escape(svc)}\s*\n((?:#[^\n]*\n)+)", content, _re.MULTILINE)
+                if m:
+                    return m.group(1).rstrip()
+            except: pass
+        return f"# {default_desc}"
+
+    def count_services_in_stack(fpath):
+        try:
+            c = open(fpath).read()
+            return len(re.findall(r"^  # ──", c, re.MULTILINE)) + 1
+        except: return 1
+
+    svc_num = count_services_in_stack(os.path.join(STACKS_DIR, target_stack + ".yml"))
+    svc_desc = load_service_desc(svc_name)
+
     net_name = container_name.replace("-","_") + "_net"
     cpuset = cfg.get("cpuset","0-15")
     cpu_shares = cfg.get("cpu_shares",4096)
@@ -844,7 +874,13 @@ networks:
     sab_group = cfg.get("sablier_group","") or "srvs"
     domain = "example.com"
     bl = []
-    bl.append(f"  # ── {container_name} ──────────────────────────────")
+    bl.append(f"  # ---------------------------------------------------------")
+    bl.append(f"  # {svc_num}. {container_name.upper()} 🐳")
+    for desc_line in svc_desc.split("\n"):
+        if desc_line.strip():
+            bl.append(f"  {desc_line}" if not desc_line.startswith("  ") else desc_line)
+    bl.append(f"  # ---------------------------------------------------------")
+    bl.append(f"  {svc_name}:")
     bl.append(f"  {svc_name}:")
     if cfg.get("use_common_caps",True): bl.append("    <<: *common-caps")
     bl.append(f"    image: {image}")
@@ -905,6 +941,19 @@ networks:
             lines.insert(insert, block+"\n")
             fcontent = "".join(lines)
         open(fpath,"w").write(fcontent)
+    # Write new service + description to descriptions file for future editing
+    try:
+        desc_file = ""
+        for line in open(os.path.join(CONF_DIR, "stacks.conf")):
+            if line.strip().startswith("BUILD_DESC_FILE="): 
+                desc_file = line.split("=",1)[1].strip('"\ ')
+        if desc_file and os.path.exists(desc_file):
+            existing = open(desc_file).read()
+            if f"\n{svc_name}\n" not in existing and not existing.startswith(svc_name):
+                with open(desc_file, "a") as df:
+                    df.write(f"\n{svc_name}\n{svc_desc}\n")
+    except: pass
+
     except Exception as e:
         import traceback
         err = traceback.format_exc()
