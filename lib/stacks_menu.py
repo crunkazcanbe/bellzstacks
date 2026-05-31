@@ -848,17 +848,10 @@ networks:
         return f"# {default_desc}"
 
     def count_services_in_stack(fpath):
-        """Count existing services to give new one the right number."""
+        """Count existing services by container_name entries."""
         try:
             c = open(fpath).read()
-            # Count service definitions (2-space indented keys under services:)
-            in_services = False
-            count = 0
-            for line in c.split("\n"):
-                if line.strip() == "services:": in_services = True; continue
-                if in_services and line.strip() == "networks:": break
-                if in_services and re.match(r"^  [a-zA-Z0-9_-]+:\s*$", line): count += 1
-            return count + 1  # next number
+            return len(re.findall(r"^    container_name:", c, re.MULTILINE)) + 1
         except: return 1
 
     svc_num = count_services_in_stack(os.path.join(STACKS_DIR, target_stack + ".yml"))
