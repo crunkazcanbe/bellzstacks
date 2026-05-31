@@ -554,14 +554,10 @@ def draw_logs_tab(win, h, w, log_lines, sel, scroll):
     try:
         win.addstr(3, 2, "DOCKER LOGS", curses.color_pair(C_ACCENT))
         win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
-        sources = [
-            ("docker-stacks", "sudo journalctl -u docker-stacks -n 50 --no-pager"),
-            ("docker-watchdog", "sudo journalctl -u docker-watchdog -n 50 --no-pager"),
-            ("traefik", "docker logs --tail=50 traefik 2>&1"),
-            ("sablier", "docker logs --tail=50 sablier 2>&1"),
-            ("crowdsec", "docker logs --tail=30 crowdsec 2>&1"),
-            ("authelia", "docker logs --tail=30 authelia 2>&1"),
-        ]
+        import glob as _glob
+        _log_dir = '/srv/stacks'
+        sources = [(f.split('/')[-1], f'cat {f}') for f in sorted(_glob.glob(f'{_log_dir}/stacks_*.log'))]
+        if not sources: sources = [('No logs found', 'echo No stacks logs found')]
         visible = h - 7
         for i, (label, _) in enumerate(sources):
             y = 5 + i
@@ -749,14 +745,12 @@ def main(stdscr):
                     do_global_action(stdscr, result[1])
 
         elif tab == 2:  # Logs
-            log_sources = [
-                ("docker-stacks",   "sudo journalctl -u docker-stacks -n 100 --no-pager"),
-                ("docker-watchdog", "sudo journalctl -u docker-watchdog -n 100 --no-pager"),
-                ("traefik",         "docker logs --tail=100 traefik 2>&1"),
-                ("sablier",         "docker logs --tail=100 sablier 2>&1"),
-                ("crowdsec",        "docker logs --tail=100 crowdsec 2>&1"),
-                ("authelia",        "docker logs --tail=100 authelia 2>&1"),
-            ]
+            import glob as _glob
+    _log_dir = '/srv/stacks'
+    _log_files = sorted(_glob.glob(f'{_log_dir}/stacks_*.log'))
+    log_sources = [(f.split('/')[-1], f'cat {f}') for f in _log_files]
+    if not log_sources:
+        log_sources = [('No logs found', 'echo No stacks logs found')]
             if k == curses.KEY_UP: sel = max(0, sel-1)
             elif k == curses.KEY_DOWN: sel = min(len(log_sources)-1, sel+1)
             elif k in (10, 13) and 0 <= sel < len(log_sources):
