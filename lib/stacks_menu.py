@@ -50,6 +50,7 @@ data_lock = threading.Lock()
 app_data = {
     "stacks": [],       # [{name, running, stopped, missing, total}]
     "containers": [],   # [{name, status, image, stack}]
+    "mem_stats": {},    # {container_name: "used / limit"}
     "last_update": 0,
 }
 
@@ -108,6 +109,25 @@ def get_containers():
     running = [c for c in containers if c.get('state','').lower() == 'running']
     others  = [c for c in containers if c.get('state','').lower() != 'running']
     return running + others
+
+def fetch_mem_stats():
+    """Fetch docker stats in background - slow but non-blocking."""
+    while True:
+        try:
+            r = subprocess.run(
+                ['docker','stats','--no-stream','--format',
+                 '{{.Name}}\t{{.MemUsage}}'],
+                capture_output=True, text=True, timeout=20)
+            if r.returncode == 0:
+                mem = {}
+                for line in r.stdout.strip().split('\n'):
+                    if '\t' in line:
+                        n, m = line.split('\t', 1)
+                        mem[n.strip()] = m.strip()
+                with data_lock:
+                    app_data['mem_stats'] = mem
+        except: pass
+        time.sleep(15)
 
 def refresh_data():
     while True:
@@ -1281,7 +1301,7 @@ def draw_containers_tab(win, h, w, containers, sel, scroll):
         color = C_RUNNING if is_running else C_STOPPED
         indicator = '●' if is_running else '○'
 
-        mem = c.get('mem','')[:14]
+        mem = app_data['mem_stats'].get(c.get('name',''), '')[:16]
         line = f'{indicator} {name:<28} {status:<10} {mem:<16} {image}'
         if idx == sel:
             try: win.addstr(y, 2, line[:w-4], curses.color_pair(C_SELECTED))
@@ -1471,6 +1491,8 @@ def main(stdscr):
     # Start background data refresh
     t = threading.Thread(target=refresh_data, daemon=True)
     t.start()
+    t2 = threading.Thread(target=fetch_mem_stats, daemon=True)
+    t2.start()
 
     # Wait for first data load
     stdscr.addstr(0, 0, 'Loading...', curses.color_pair(C_DIM))
