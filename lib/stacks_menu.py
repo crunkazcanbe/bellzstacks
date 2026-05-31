@@ -432,6 +432,8 @@ def _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
         except: pass
         try: popup.addstr(7, 16, "  NO   ", no_attr)
         except: pass
+        try: popup.addstr(ph-2, 2, "←→ Select  ENTER confirm  ESC/Ctrl+C cancel", curses.color_pair(C_DIM))
+        except: pass
         popup.refresh()
         k = popup.getch()
         if k == curses.KEY_RESIZE: continue
@@ -625,7 +627,7 @@ def _registry_search_inner(stdscr, term, bar_w, pct, title, spinner, frame):
 
             # Footer
             total = len(get_visible())
-            try: popup.addstr(ph-2, 2, f"[{total}]  ◀▶ reg  ↑↓ scroll  ENTER select  ESC/Q cancel"[:pw-4], curses.color_pair(C_DIM))
+            try: popup.addstr(ph-2, 2, f"[{total}]  ◀▶ reg  ↑↓  ENTER select  Q/ESC/Ctrl+C cancel"[:pw-4], curses.color_pair(C_DIM))
             except: pass
             popup.refresh()
         except: pass
@@ -1274,6 +1276,8 @@ def _bw_yesno(popup, pw, ph, prompt, default, bar_w, pct, title, spinner, frame)
         except: pass
         try: popup.addstr(7, 16, "  NO   ", no_attr)
         except: pass
+        try: popup.addstr(ph-2, 2, "←→ Select  ENTER confirm  ESC/Ctrl+C cancel", curses.color_pair(C_DIM))
+        except: pass
         popup.refresh()
         k = popup.getch()
         if k == curses.KEY_RESIZE: continue
@@ -1573,7 +1577,7 @@ Mounts: {{len .Mounts}} volumes''',
         for i, l in enumerate(lines[scroll:scroll+visible]):
             try: popup.addstr(2+i, 2, l[:pw-4], curses.color_pair(C_NORMAL))
             except: pass
-        try: popup.addstr(ph-2, 2, "↑↓ Scroll  ESC Close"[:pw-4], curses.color_pair(C_DIM))
+        try: popup.addstr(ph-2, 2, "↑↓ Scroll  ENTER Select  ESC/← Cancel"[:pw-4], curses.color_pair(C_DIM))
         except: pass
         popup.refresh()
         k = popup.getch()
