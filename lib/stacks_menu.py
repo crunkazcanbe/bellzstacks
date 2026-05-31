@@ -301,14 +301,14 @@ def run_sequence_popup(stdscr, title, steps):
             for raw in proc.stdout:
                 line=re.sub(r"\x1b[^a-zA-Z]*[a-zA-Z]","",raw)
                 line=re.sub(r"[\x00-\x1f\x7f]","",line).strip()
-                # Skip stacks art, loading bar chars, short noise
                 cleaned = clean_log_line(line)
                 if cleaned:
                     last_log[0] = cleaned
-                    frame+=1; draw(i,slabel)
+                frame += 1
+                draw(i, slabel)
                 _t.sleep(0.08)
-                k=popup.getch()
-                if k in (27,ord("q"),ord("Q")): proc.terminate(); cancelled=True; break
+                k = popup.getch()
+                if k in (27, ord("q"), ord("Q")): proc.terminate(); cancelled=True; break
             if cancelled: break
         except KeyboardInterrupt: proc.terminate(); cancelled=True
         proc.wait()
