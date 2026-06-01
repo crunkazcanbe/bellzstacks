@@ -23,8 +23,8 @@ def is_support(name):
            {'postgres','mysql','mongo','redis','rabbitmq','memcached'})
 
 def root(name):
-    """Get first meaningful segment: authentik-server -> authentik"""
-    return name.replace('_','-').split('-')[0]
+    """Get first meaningful segment: authentik-server -> authentik, wazuh.manager -> wazuh"""
+    return name.replace('_','-').replace('.','-').split('-')[0]
 
 def related(a, b):
     """True if a and b are likely in the same family."""
