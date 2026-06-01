@@ -1162,8 +1162,32 @@ def run_build_wizard(stdscr, new_stack=False):
         dbl.append(f"    volumes:")
         _vol_name = f"{_dn}_data"
         dbl.append(f"      - {_vol_name}:/var/lib/{_dt}/data" if _dt not in ("redis","mongo") else f"      - {_vol_name}:/data")
-        bl.append("")
-        bl.extend(dbl)
+        # Write DB to its target stack, not main stack
+        _db_stack = db_info.get("stack") or target_stack
+        _db_fpath = os.path.join(STACKS_DIR, _db_stack + ".yml")
+        _db_block = "\n".join(dbl) + "\n"
+        if _db_fpath == fpath:
+            # Same file - append to main bl
+            bl.append("")
+            bl.extend(dbl)
+        else:
+            # Different file - inject into that stack
+            try:
+                _db_content = open(_db_fpath).read() if os.path.exists(_db_fpath) else f"name: {_db_stack}\nservices:\n"
+                if "##STACKS_ART_START_FOOTER" in _db_content:
+                    _db_content = _db_content.replace("##STACKS_ART_START_FOOTER", _db_block + "\n##STACKS_ART_START_FOOTER", 1)
+                else:
+                    _db_lines = _db_content.splitlines(keepends=True)
+                    _ins = len(_db_lines)
+                    for _di in range(len(_db_lines)-1,-1,-1):
+                        if not _db_lines[_di].startswith("#") and _db_lines[_di].strip():
+                            _ins = _di+1; break
+                    _db_lines.insert(_ins, _db_block + "\n")
+                    _db_content = "".join(_db_lines)
+                open(_db_fpath, "w").write(_db_content)
+            except Exception as _dbe:
+                bl.append("")
+                bl.extend(dbl)  # fallback to main stack
 
     block = "\n".join(bl) + "\n"
 
