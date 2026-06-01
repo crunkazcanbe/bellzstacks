@@ -2303,26 +2303,88 @@ def post_build_inject_volume(fpath, svc_name, cfg=None):
 
 def post_build_inject(fpath, svc_name, cfg=None):
     """
-    Single callable for post-build injection.
-    Only adds networks and volumes - nothing else.
-    Run stacks fix separately for healthchecks, depends_on etc.
-    Config option BUILD_RUN_FIX=1 to run full fix after build.
+    Called after build wizard. Runs Phase 1 of stacks fix:
+    - Scans for missing networks/volumes in the compose file
+    - Adds full network definition (with subnet) to creator file
+    - Adds network/volume to provisioner container in creator file
+    - Adds top-level network/volume references to compose file
+    This reuses the exact same code as stacks fix Phase 1.
     """
     if cfg is None: cfg = load_conf()
     notes = []
-    notes += post_build_inject_network(fpath, svc_name, cfg)
-    notes += post_build_inject_volume(fpath, svc_name, cfg)
-    # Optional: run full fix if config says so
-    if cfg.get("BUILD_RUN_FIX","0") == "1":
-        import subprocess as _sp, os as _os
-        stack = _os.path.basename(fpath).replace(".yml","").replace(".yaml","")
-        try:
-            r = _sp.run(["python3","/usr/local/lib/stacks_fix.py",stack],
-                capture_output=True, text=True, timeout=60)
-            notes.append(f"fix ran on {stack}" if r.returncode==0 else f"fix error: {r.stderr[:80]}")
-        except Exception as e:
-            notes.append(f"fix error: {e}")
+    try:
+        import os as _os
+        stacks_dir = _os.dirname(fpath)
+        stack = _os.path.basename(fpath).replace(".yml","")
+
+        # Enable just Phase 1 (network/volume define)
+        _cfg = dict(cfg)
+        _cfg["FIX_DEFINE_NETVOL"] = "1"
+        _cfg["FIX_HEALTHCHECKS"] = "0"
+        _cfg["FIX_STRIP_PROFILES"] = "0"
+        _cfg["FIX_REMOVE_GAPS"] = "0"
+        _cfg["FIX_AUTO_NAME"] = "0"
+        _cfg["FIX_AUTO_DEPENDS"] = "0"
+        _cfg["FIX_GROUP_SAME_IP"] = "0"
+
+        # Handle creator file selection from wizard
+        if cfg.get("creator_stack") == "new":
+            _cfg["FIX_FORCE_CREATE_CREATOR"] = "1"
+        elif cfg.get("creator_stack"):
+            _cfg["FIX_CREATOR_TARGET"] = cfg["creator_stack"]
+
+        # Handle external vs internal
+        if not cfg.get("external_network", True):
+            _cfg["FIX_INLINE_NETWORKS"] = "1"
+            _cfg["FIX_INLINE_VOLUMES"] = "1"
+
+        # Run Phase 1 directly
+        # Discover what's missing in this file
+        missing_nets, missing_vols = set(), set()
+        for svc in _parse_services_phase1(fpath):
+            for net in svc.get("networks", []):
+                if net not in ("traefik_net","apartment_net"):
+                    missing_nets.add(net)
+            for vol in svc.get("named_volumes", []):
+                missing_vols.add(vol)
+
+        # Find creator and add
+        creator = find_or_create_creator(stacks_dir, _cfg)
+        if creator and (missing_nets or missing_vols):
+            creators = discover_creator_files(stacks_dir)
+            used = all_used_subnets(creators, _cfg.get("FIX_SUBNET_BASE","10.50"))
+            result = add_to_creator(creator, missing_nets, missing_vols,
+                _cfg.get("FIX_SUBNET_BASE","10.50"), used, False)
+            if result:
+                notes.append(f"added {len(missing_nets)} nets, {len(missing_vols)} vols to {os.path.basename(creator)}")
+
+        # Also add bind mount volume if BUILD_AUTO_VOLUME=1
+        if _cfg.get("BUILD_AUTO_VOLUME","0") == "1":
+            notes += post_build_inject_volume(fpath, svc_name, _cfg)
+
+    except Exception as e:
+        notes.append(f"post_build error: {e}")
     return notes
+
+
+def _parse_services_phase1(fpath):
+    """Parse services from a compose file for Phase 1 network/volume detection."""
+    import re as _re
+    result = []
+    try:
+        svcs, _ = parse_services_with_positions(fpath)
+        data = open(fpath).read()
+        for svc in svcs:
+            idx = data.find(f"container_name: {svc['name']}")
+            if idx < 0: continue
+            block = data[idx:idx+3000]
+            nets = _re.findall(r"^\s{6}(\w+_net)\s*:", block, _re.MULTILINE)
+            # Named volumes (not bind mounts)
+            vols = [v for v in _re.findall(r"-\s+(\w[\w-]+):/", block)
+                   if not v.startswith("/") and "/" not in v]
+            result.append({"name": svc["name"], "networks": nets, "named_volumes": vols})
+    except: pass
+    return result
 
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
