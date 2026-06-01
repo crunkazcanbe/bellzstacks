@@ -2230,10 +2230,16 @@ def post_build_inject_network(fpath, svc_name, cfg=None):
         if changed:
             notes.append("added traefik_net")
 
-        # Declare network in creator file
-        stacks_dir = os.path.dirname(fpath)
-        ensure_network_in_creator_file(net_name, stacks_dir,
-            cfg.get("FIX_SUBNET_BASE","10.50"))
+        # Add network to creator file using add_to_creator
+        # This adds top-level def AND provisioner network list
+        creator = find_or_create_creator(stacks_dir, cfg)
+        if creator:
+            _creators = discover_creator_files(stacks_dir)
+            _used = all_used_subnets(_creators, cfg.get("FIX_SUBNET_BASE","10.50"))
+            _r = add_to_creator(creator, {net_name}, set(),
+                cfg.get("FIX_SUBNET_BASE","10.50"), _used, False)
+            if _r: notes.append(f"added {net_name} to {os.path.basename(creator)}")
+        lines, _ = ensure_network_declared(lines, net_name)
         lines, _ = ensure_network_declared(lines, net_name)
 
         if notes:
