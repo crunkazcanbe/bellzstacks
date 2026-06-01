@@ -1575,7 +1575,9 @@ def get_all_groups_global(all_files):
 
     result = {}
     for head, members in families.items():
-        net_name = f"{head.replace('.', '-').replace('_', '-')}_net"
+        # Network name uses common root (first segment), not full head name
+        _root = head.replace('.', '-').replace('_', '-').split('-')[0]
+        net_name = f"{_root}_net"
         members_by_file = {}
         for m in members:
             f = cname_to_file.get(m)
