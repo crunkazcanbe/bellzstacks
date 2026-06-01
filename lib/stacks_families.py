@@ -101,7 +101,10 @@ def build_families(containers):
         if any(s in head for s in SKIP_CONTAINERS): continue
         apps = [m for m in members if not is_support(m)]
         supports = [m for m in members if is_support(m)]
-        if not apps or not supports: continue
+        if not apps: continue
+        if not supports:
+            roots = set(root(m) for m in members)
+            if len(roots) > 1: continue
         new_head = min(apps, key=lambda x: (len(x), x))
         result[new_head] = members
     return result
