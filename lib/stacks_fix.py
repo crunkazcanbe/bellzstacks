@@ -766,15 +766,24 @@ DB_SUFFIXES = ('-db', '-database', '-postgres', '-mysql', '-mongo', '-mariadb',
                '_db', '_database', '_postgres', '_mysql', '_mongo', '_mariadb',
                '-sqlite', '-clickhouse', '-cassandra', '-couchdb', '-dynamodb')
 CACHE_SUFFIXES = ('-redis', '-cache', '-memcached', '-valkey', '_redis', '_cache')
-WORKER_SUFFIXES = ('-worker', '-celery', '-beat', '-scheduler', '_worker', '_celery')
+WORKER_SUFFIXES = ('-worker', '-celery', '-beat', '-scheduler', '_worker', '_celery',
+                   '-realtime', '-agent', '-proxy', '-exporter', '-cron', '-daemon',
+                   '-sidekiq', '-resque', '-queue', '-consumer', '-listener',
+                   '_realtime', '_agent', '_proxy', '_cron', '_daemon')
 
 def classify_container(name):
-    """Classify container role: db, cache, worker, or app."""
+    """
+    Classify container role: db, cache, worker, companion, or app.
+    - db: database containers (postgres, mysql, mongo etc)
+    - cache: redis, memcached etc
+    - worker: background workers, celery, realtime companions
+    - app: main application container
+    """
     n = name.lower()
     for s in DB_SUFFIXES:
-        if n.endswith(s) or s[1:] in n: return 'db'
+        if n.endswith(s): return 'db'
     for s in CACHE_SUFFIXES:
-        if n.endswith(s) or s[1:] in n: return 'cache'
+        if n.endswith(s): return 'cache'
     for s in WORKER_SUFFIXES:
         if n.endswith(s): return 'worker'
     return 'app'
@@ -785,6 +794,7 @@ def inject_depends_on(fpath, cfg):
     Apps depend on their db and cache.
     Workers depend on the app.
     Only injects if FIX_AUTO_DEPENDS=1 in config.
+    Skips groups where ALL members are dbs/caches (pure db files).
     """
     if cfg.get("FIX_AUTO_DEPENDS","0") != "1":
         return []
@@ -808,10 +818,32 @@ def inject_depends_on(fpath, cfg):
             caches  = [n for n,r in roles.items() if r == 'cache']
             workers = [n for n,r in roles.items() if r == 'worker']
 
+            # Skip groups with no app or worker - pure db groups
+            if not apps and not workers:
+                continue
+            # Skip groups where group is too large (>8) - likely false positive
+            if len(group) > 8:
+                continue
+
             # Build depends map: app -> [db, cache], worker -> [app]
             deps_map = {}
             for app in apps:
-                deps = dbs + caches
+                # Only depend on dbs/caches that share a name prefix with app
+                related_dbs = [d for d in dbs if
+                    d.startswith(app.split('-')[0]) or
+                    d.startswith(app.split('_')[0]) or
+                    app.startswith(d.split('-')[0]) or
+                    app.startswith(d.split('_')[0])]
+                related_caches = [c for c in caches if
+                    c.startswith(app.split('-')[0]) or
+                    c.startswith(app.split('_')[0]) or
+                    app.startswith(c.split('-')[0]) or
+                    app.startswith(c.split('_')[0])]
+                # Fall back to all dbs/caches if no prefix match and group is small
+                if not related_dbs and not related_caches and len(group) <= 4:
+                    related_dbs = dbs
+                    related_caches = caches
+                deps = related_dbs + related_caches
                 if deps: deps_map[app] = deps
             for worker in workers:
                 if apps: deps_map[worker] = apps
