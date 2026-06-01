@@ -1120,6 +1120,51 @@ def run_build_wizard(stdscr, new_stack=False):
     if sab_enable: bl.append('      - "sablier.enable=true"')
     bl.append(f'      - "sablier.group={sab_group}"')
     for el in extra_labels: bl.append(f'      - "{el}"')
+
+    # ── Add DB companion service if selected ──────────────────
+    if db_info and db_info.get("type") and db_info["type"] != "none":
+        _dt = db_info["type"]
+        _dn = db_info["name"]
+        _dp = db_info.get("pass","changeme")
+        _dd = db_info.get("db", svc_name.replace("-","_"))
+        _dnet = net_name
+        _dip = db_info.get("ip","")
+        dbl = []
+        dbl.append(f"  # DB: {_dn} ({_dt})")
+        dbl.append(f"  {_dn}:")
+        if cfg.get("use_common_caps",True): dbl.append("    <<: *common-caps")
+        if _dt == "postgres":
+            dbl.append("    image: postgres:16-alpine")
+            dbl.append(f"    container_name: {_dn}")
+            dbl.append(f"    hostname: {_dn}")
+            dbl.append(f'    environment:\n      - POSTGRES_PASSWORD={_dp}\n      - POSTGRES_DB={_dd}\n      - POSTGRES_USER=postgres')
+        elif _dt == "mysql" or _dt == "mariadb":
+            img = "mariadb:11" if _dt=="mariadb" else "mysql:8"
+            dbl.append(f"    image: {img}")
+            dbl.append(f"    container_name: {_dn}")
+            dbl.append(f"    hostname: {_dn}")
+            dbl.append(f'    environment:\n      - MYSQL_ROOT_PASSWORD={_dp}\n      - MYSQL_DATABASE={_dd}\n      - MYSQL_USER=dbuser\n      - MYSQL_PASSWORD={_dp}')
+        elif _dt == "mongo":
+            dbl.append(f"    image: mongo:7")
+            dbl.append(f"    container_name: {_dn}")
+            dbl.append(f"    hostname: {_dn}")
+            dbl.append(f'    environment:\n      - MONGO_INITDB_ROOT_USERNAME=admin\n      - MONGO_INITDB_ROOT_PASSWORD={_dp}\n      - MONGO_INITDB_DATABASE={_dd}')
+        elif _dt == "redis":
+            dbl.append(f"    image: redis:7-alpine")
+            dbl.append(f"    container_name: {_dn}")
+            dbl.append(f"    hostname: {_dn}")
+        dbl.append(f'    cpuset: "{cpuset}"')
+        dbl.append(f"    cpu_shares: {cpu_shares}")
+        dbl.append(f"    restart: {restart_pol}")
+        dbl.append("    networks:")
+        dbl.append(f"      {_dnet}:")
+        if _dip: dbl.append(f"        ipv4_address: {_dip}")
+        dbl.append(f"    volumes:")
+        _vol_name = f"{_dn}_data"
+        dbl.append(f"      - {_vol_name}:/var/lib/{_dt}/data" if _dt not in ("redis","mongo") else f"      - {_vol_name}:/data")
+        bl.append("")
+        bl.extend(dbl)
+
     block = "\n".join(bl) + "\n"
 
     # Inject into stack
