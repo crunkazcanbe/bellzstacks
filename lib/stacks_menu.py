@@ -1183,10 +1183,9 @@ def run_build_wizard(stdscr, new_stack=False):
     try:
         import sys as _sys2
         _sys2.path.insert(0, '/usr/local/lib')
-        from stacks_fix import post_build_inject_network, post_build_inject_volume, load_conf as _lc
+        from stacks_fix import post_build_inject, load_conf as _lc
         _cfg = _lc()
-        _net_notes = post_build_inject_network(fpath, svc_name, _cfg)
-        _vol_notes = post_build_inject_volume(fpath, svc_name, _cfg)
+        _notes = post_build_inject(fpath, svc_name, _cfg)
     except Exception as _pbe:
         pass  # non-fatal, don't block build completion
 

@@ -2288,6 +2288,20 @@ def post_build_inject_volume(fpath, svc_name, cfg=None):
         notes.append(f"volume inject error: {e}")
     return notes
 
+
+def post_build_inject(fpath, svc_name, cfg=None):
+    """
+    Single callable for post-build injection.
+    Call this after adding a new container via build wizard.
+    Handles: network def in creator file, network in service,
+             traefik_net, and bind mount volume if none exists.
+    """
+    if cfg is None: cfg = load_conf()
+    notes = []
+    notes += post_build_inject_network(fpath, svc_name, cfg)
+    notes += post_build_inject_volume(fpath, svc_name, cfg)
+    return notes
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     dry_run = '--dry-run' in sys.argv[1:]
