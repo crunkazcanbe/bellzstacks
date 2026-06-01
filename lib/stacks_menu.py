@@ -2177,11 +2177,9 @@ def main(stdscr):
         if k == curses.KEY_RIGHT:
             tab = (tab + 1) % len(TABS)
             sel = 0; scroll = 0
-            continue
-        if k == curses.KEY_LEFT:
+        elif k == curses.KEY_LEFT:
             tab = (tab - 1) % len(TABS)
             sel = 0; scroll = 0
-            continue
 
         # Tab-specific keys
         if tab == 0:  # Containers
