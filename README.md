@@ -1,5 +1,5 @@
 cat > /home/user/stacks/README.md << 'EOF'
-# 🐳 StacksStacks
+# 🐳 Stacks
 
 > A powerful Docker stack management CLI and TUI — built entirely with AI assistance (Claude by Anthropic).
 
