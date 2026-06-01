@@ -992,6 +992,10 @@ def run_build_wizard(stdscr, new_stack=False):
                         except: pass
                     _creators.append("\u2795 Create new")
                     curses.flushinp()
+                    popup.clear()
+                    draw_border_box(popup, 0, 0, ph, pw, f" {title[:pw-4]} ")
+                    popup.refresh()
+                    curses.flushinp()
                     _chosen = sel("Add to which stack?", _creators)
                     curses.flushinp()
                     state["creator_stack"] = "new" if (not _chosen or _chosen == "\u2795 Create new") else _chosen
