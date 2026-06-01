@@ -75,11 +75,11 @@ def get_related_containers(fpath):
             # depends_on entries
             for dep in re.findall(r'depends_on[^:]*:[^\n]*\n((?:\s+-\s+\S+\n)+)', block):
                 for d in re.findall(r'-\s+(\S+)', dep):
-                    my_deps.add(d)
+                    my_deps.add(d.strip('"\''))
             # env var references to other containers
             for ref in re.findall(r'(?:DB_HOST|REDIS_HOST|DATABASE_HOST|POSTGRES_HOST|MYSQL_HOST|MONGO_HOST|REDIS_URL|DATABASE_URL)=(?:https?://)?([\w.-]+)', block):
                 if ref in cnames:
-                    my_deps.add(ref)
+                    my_deps.add(ref.strip('"\''))
             if my_deps:
                 deps[cname] = my_deps
 
