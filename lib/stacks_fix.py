@@ -2282,6 +2282,73 @@ def main():
 
 
     _files = files  # alias for phase 4/5
+    # ── Phase 3.6: Group IP alignment ────────────────────────────────────────
+    # Move all family members to same IP as the family head (app container)
+    if on(cfg.get("FIX_GROUP_SAME_IP", "0")):
+        pr(f"\n{C}🔗 Aligning family IPs (all members -> same IP as head){X}")
+        import glob as _gl
+        try:
+            from stacks_families import get_families
+            from stacks_collision import scan_all_ports, is_locked_container
+        except Exception as _e:
+            pr(f"  {R}✘ Could not load families/collision lib: {_e}{X}")
+            goto_next = True
+        else:
+            goto_next = False
+        if not goto_next:
+            _all_fams = get_families()
+            _port_map = scan_all_ports()
+
+            def _get_ip_ports(cname):
+                for _fp in _gl.glob(f"{sd}/*.yml"):
+                    _d = open(_fp).read()
+                    if f"container_name: {cname}" not in _d: continue
+                    _idx = _d.find(f"container_name: {cname}")
+                    _blk = _d[_idx:_idx+3000]
+                    _nxt = re.search(r"\n  [a-zA-Z]", _blk[10:])
+                    if _nxt: _blk = _blk[:_nxt.start()+10]
+                    _pips = re.findall(r"(192\.168\.1\.\d+):(\d+):\d+", _blk)
+                    if _pips: return _pips[0][0], [p[1] for p in _pips], _fp
+                    _m = re.search(r"ipv4_address:\s*(192\.168\.1\.\d+)", _blk)
+                    if _m: return _m.group(1), [], _fp
+                return None, [], None
+
+            _grp_fixed = 0
+            for _head, _members in sorted(_all_fams.items()):
+                _head_ip, _, _ = _get_ip_ports(_head)
+                if not _head_ip: continue
+                for _dep in sorted(_members):
+                    if _dep == _head: continue
+                    if is_locked_container(_dep): continue
+                    _dip, _dports, _dfp = _get_ip_ports(_dep)
+                    if not _dip or not _dfp: continue
+                    if _dip == _head_ip: continue
+                    # Check port conflicts on head IP
+                    _ok = all(
+                        f"{_head_ip}:{p}" not in _port_map or
+                        all(o[1]==_dep for o in _port_map[f"{_head_ip}:{p}"])
+                        for p in _dports
+                    )
+                    if not _ok:
+                        pr(f"  {Y}SKIP {_dep}: port conflict on {_head_ip}{X}")
+                        continue
+                    if dry_run:
+                        pr(f"  {G}[dry] {_dep}: {_dip} -> {_head_ip} [{_head}]{X}")
+                    else:
+                        _dc = open(_dfp).read()
+                        _didx = _dc.find(f"container_name: {_dep}")
+                        _pre = _dc[:_didx]
+                        _rest = _dc[_didx:_didx+3000]
+                        _nxt = re.search(r"\n  [a-zA-Z]", _rest[10:])
+                        _blen = _nxt.start()+10 if _nxt else 3000
+                        _blk = _rest[:_blen].replace(f"{_dip}:", f"{_head_ip}:")
+                        open(_dfp, "w").write(_pre + _blk + _rest[_blen:])
+                        pr(f"  {G}✔ {_dep}: {_dip} -> {_head_ip} [{_head}]{X}")
+                    _grp_fixed += 1
+            if _grp_fixed == 0:
+                pr(f"  {G}✔ All family IPs already aligned{X}")
+            total += _grp_fixed
+
     # ── Phase 4a: collapse double-spaced files ──────────────────────────────
     for f in _files:
         try:
