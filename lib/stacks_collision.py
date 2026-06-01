@@ -117,22 +117,12 @@ def get_related_containers(fpath):
                 if long.startswith(short+'-') or long.startswith(short+'_'):
                     merge(c1, c2)
 
-        # ── SECONDARY 3: depends_on ───────────────────────────────────────────
+        # ── SECONDARY 3: depends_on
         for cname, block in info.items():
-        # ── SECONDARY 3: depends_on ─────────────────────────────────────
-        for cname, block in info.items():
-            deps_found = re.findall(r'depends_on', block)
-            if deps_found:
-                for d in re.findall(r'-\s+["\']?([\w][\w-]+)["\']?', block):
+            if "depends_on" in block:
+                for d in re.findall(r"-\s+[A-Za-z][\w-]+", block):
+                    d = d.strip().lstrip("- ").strip("\"'")
                     if d in cnames and d != cname: merge(cname, d)
-]*
-((?:\s+-\s+\S+
-)+)', block):
-                for d in re.findall(r'-\s+["']?(\w[\w-]+)["']?', dep):
-                    if d in cnames: merge(cname, d)
-            for dep in re.findall(r'depends_on.*?["']?(\w[\w-]+)["']?\s*:\s*
-\s+condition', block):
-                if dep in cnames: merge(cname, dep)
 
         # ── SECONDARY 4: Env var references ──────────────────────────────────
         ENV_KEYS = (
