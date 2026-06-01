@@ -72,6 +72,8 @@ def load_conf():
         "FIX_REMOVE_GAPS": "1",  # set to 0 to disable blank line removal in service blocks
         "FIX_HC_IGNORE_STACKS": "",  # space-separated stack files to skip healthcheck changes
         "FIX_REPLACE_BROKEN_HC": "0",  # set to 1 to replace actively-failing healthchecks
+        "FIX_FORCE_HC": "0",           # set to 1 to replace ALL healthchecks
+        "FIX_FORCE_HC_CONTAINERS": "",  # comma-separated containers to always force-update HC
         "FIX_STRIP_PROFILES": "1",  # set to 0 to disable auto-stripping of profiles: blocks
         "FIX_SKIP_FILES": "net_0-ext.yml",
         "FIX_HC_SKIP": "",

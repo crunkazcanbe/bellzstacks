@@ -240,6 +240,7 @@ for arg in "$@"; do
     info|i) DO_INFO=1 ;;
     clean) DO_CLEAN=1 ;;
     force) DO_FORCE=1 ;;
+    force-hc) DO_FORCE=1; export FIX_FORCE_HC=1 ;;
     *) TARGET_ARGS+=("$arg") ;;
   esac
 done
