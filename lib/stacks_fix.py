@@ -677,15 +677,28 @@ def discover_creator_files(stacks_dir, skip_files=None):
     return creators
 
 def smallest_file_overall(stacks_dir):
+    """Find smallest yml file that has a provisioner container.
+    Falls back to smallest creator file with a networks: section.
+    Never picks files without a provisioner or networks: block."""
     best = None; best_size = float('inf')
+    fallback = None; fallback_size = float('inf')
     for f in sorted(os.listdir(stacks_dir)):
         if not (f.endswith('.yml') or f.endswith('.yaml')):
             continue
         path = os.path.join(stacks_dir, f)
+        try:
+            content = open(path).read()
+        except: continue
         sz = os.path.getsize(path)
-        if sz < best_size:
-            best_size = sz; best = path
-    return best
+        # Prefer files with provisioner container
+        if re.search(r'container_name:\s*provisioner', content):
+            if sz < best_size:
+                best_size = sz; best = path
+        # Fallback: files with networks: section
+        elif re.search(r'^networks:\s*$', content, re.MULTILINE):
+            if sz < fallback_size:
+                fallback_size = sz; fallback = path
+    return best or fallback
 
 def all_used_subnets(creators, subnet_base):
     """Scan every creator file for used 3rd octets in <base>.<N>.0/24."""
