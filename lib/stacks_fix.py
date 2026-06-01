@@ -274,27 +274,16 @@ name: {name}
 # Auto-generated network/volume creator file
 # Managed by stacks stacks fixer - do not edit manually
 #======================================================================
-x-common-caps: &common-caps
-  restart: unless-stopped
-  logging:
-    driver: json-file
-    options: {{max-size: 10m, max-file: '3'}}
-
 services:
   {provisioner_name}:
-    <<: *common-caps
-    container_name: {provisioner_name}
     image: alpine:latest
-    command: >
-      sh -c "
-      {network_cmds}
-      {volume_cmds}
-      echo All networks and volumes created.
-      sleep infinity"
+    container_name: {provisioner_name}
+    command: tail -f /dev/null
+    restart: "no"
+    cpuset: "4-5"
+    cpu_shares: 256
     networks:
 {service_networks}
-    volumes:
-{service_volumes}
 
 networks:
 {top_networks}
