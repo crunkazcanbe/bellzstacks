@@ -798,7 +798,24 @@ def inject_depends_on(fpath, cfg):
     """
     auto = cfg.get("FIX_AUTO_DEPENDS","0") == "1"
     force = cfg.get("FIX_FORCE_DEPENDS","0") == "1"
-    if not auto and not force:
+    remove_all = cfg.get("FIX_REMOVE_DEPENDS","0") == "1"
+    if not auto and not force and not remove_all:
+        return []
+    # Remove-only mode: strip all depends_on from this file
+    if remove_all:
+        data = open(fpath).read()
+        lines = data.splitlines(keepends=True)
+        new_lines = []
+        in_dep = False
+        for l in lines:
+            if re.match(r"    depends_on:", l): in_dep = True; continue
+            if in_dep:
+                if re.match(r"      [-{]", l): continue
+                else: in_dep = False
+            new_lines.append(l)
+        if len(new_lines) != len(lines):
+            open(fpath, "w").writelines(new_lines)
+            return [f"removed depends_on from {fpath.split('/')[-1]}"]
         return []
     notes = []
     try:
