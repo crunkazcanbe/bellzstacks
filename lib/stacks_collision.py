@@ -119,7 +119,12 @@ def get_related_containers(fpath):
 
         # ── SECONDARY 3: depends_on ───────────────────────────────────────────
         for cname, block in info.items():
-            for dep in re.findall(r'depends_on[^
+        # ── SECONDARY 3: depends_on ─────────────────────────────────────
+        for cname, block in info.items():
+            deps_found = re.findall(r'depends_on', block)
+            if deps_found:
+                for d in re.findall(r'-\s+["\']?([\w][\w-]+)["\']?', block):
+                    if d in cnames and d != cname: merge(cname, d)
 ]*
 ((?:\s+-\s+\S+
 )+)', block):
