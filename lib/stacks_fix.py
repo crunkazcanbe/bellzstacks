@@ -2263,10 +2263,13 @@ def post_build_inject_volume(fpath, svc_name, cfg=None):
         if "volumes:" in block:
             import re as _re2
             # Only skip if there's a bind mount that looks like a data dir
-            data_vols = _re2.findall(r'-\s+(/home/\S+|/data/\S+|/var/lib/\S+):', block)
-            named_vols = _re2.findall(r'-\s+\w[\w-]+:/\w', block)
-            if data_vols or named_vols:
-                return []  # has real data volume
+            # Ignore /usr/lib shared lib mounts - those aren't data volumes
+            data_vols = _re2.findall(r'-\s+(/home/\S+|/data/\S+|/var/lib/\S+|/etc/\S+):', block)
+            named_vols = _re2.findall(r'-\s+[\w][\w-]+:/\w', block)
+            lib_only = all('/usr/lib' in v or '/usr/local/lib' in v 
+                          for v in _re2.findall(r'-\s+(\S+):\S+', block))
+            if (data_vols or named_vols) and not lib_only:
+                return []
         vol_base = cfg.get("FIX_VOLUME_BASE","/srv/stacks/docker")
         vol_path = f"{vol_base}/{svc_name}/config"
         os.makedirs(vol_path, exist_ok=True)
