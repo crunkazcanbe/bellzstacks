@@ -1107,7 +1107,6 @@ PYEOF
       update_ui "⚠️ Error detected in $stack. Repair Mode ACTIVE..." "$CURRENT_PERCENT"
       sleep 1.5
       # ── STUCK CONTAINER CLEANUP ─────────────────────────────────────────
-      update_ui "🧹 Cleaning stuck containers..." "$CURRENT_PERCENT"
       # Only clean stuck containers belonging to THIS stack
       _stack_svcs=$(awk '/^services:/{flag=1; next} /^[a-z]/{flag=0} flag && /^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/, ""); print}' "$STACKS_DIR/$stack.yml" 2>/dev/null)
       _stuck=""
@@ -1121,6 +1120,7 @@ PYEOF
 ' | sort -u | tr '
 ' ' ')
       if [ -n "$_stuck" ]; then
+        update_ui "🧹 Cleaning stuck containers..." "$CURRENT_PERCENT"
         for _sc in $_stuck; do
           update_ui "🗑️ Removing stuck: $_sc" "$CURRENT_PERCENT"
           docker rm -f "$_sc" >/dev/null 2>&1 || true
