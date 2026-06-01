@@ -984,14 +984,19 @@ def run_build_wizard(stdscr, new_stack=False):
                 if net_type and "External" in net_type:
                     state["external_network"] = True
                     import glob as _gl
-                    # Only show files that already have external networks (creator files)
-                    _creators = sorted([
-                        os.path.basename(f).replace(".yml","")
-                        for f in _gl.glob(f"{STACKS_DIR}/*.yml")
-                        if "provisioner" in open(f).read()
-                    ])
+                    # Only show files that have provisioner containers
+                    import glob as _gl
+                    _creators = []
+                    for _cf in sorted(_gl.glob(f"{STACKS_DIR}/*.yml")):
+                        try:
+                            if "provisioner" in open(_cf).read():
+                                _creators.append(os.path.basename(_cf).replace(".yml",""))
+                        except: pass
                     _creators.append("➕ Create new")
-                    _chosen = sel("Add to which stack?", _creators)
+                    try:
+                        _chosen = sel("Add to which stack?", _creators)
+                    except Exception as _se:
+                        _chosen = None
                     state["creator_stack"] = "new" if _chosen == "➕ Create new" else (_chosen or "new")
                 else:
                     state["external_network"] = False
