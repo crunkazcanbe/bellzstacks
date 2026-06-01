@@ -2374,9 +2374,7 @@ def main(stdscr):
                     run_log_popup(stdscr, 'Repair ALL', f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}')
 
         elif tab == 8:  # Network
-                tab = (tab + 1) % len(TABS); sel = 0; scroll = 0
-                tab = (tab - 1) % len(TABS); sel = 0; scroll = 0
-            elif k in (10, 13, ord("s"), ord("S")):
+            if k in (10, 13, ord("s"), ord("S")):
                 run_log_popup(stdscr, "Scan collisions", "python3 /usr/local/lib/stacks_collision.py")
                 stdscr.clear()
             elif k in (ord("e"), ord("E")):
@@ -2384,16 +2382,14 @@ def main(stdscr):
                 os.system(f'{os.environ.get("EDITOR","nano")} {os.path.expanduser("~/.config/stacks/stacks.conf")}')
                 stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
         elif tab == 9:  # Updates
-                tab = (tab + 1) % len(TABS); sel = 0; scroll = 0
-                tab = (tab - 1) % len(TABS); sel = 0; scroll = 0
-            elif k in (ord("c"), ord("C")):
+            if k in (ord("c"), ord("C")):
                 run_log_popup(stdscr, "Check updates", "python3 /usr/local/lib/stacks_updates.py")
                 stdscr.clear()
             elif k in (ord("f"), ord("F")):
-                run_log_popup(stdscr, "Force check updates", "python3 /usr/local/lib/stacks_updates.py --force")
+                run_log_popup(stdscr, "Force check", "python3 /usr/local/lib/stacks_updates.py --force")
                 stdscr.clear()
             elif k in (ord("p"), ord("P")):
-                run_log_popup(stdscr, "Pull all updates", "python3 /usr/local/lib/stacks_updates.py --pull")
+                run_log_popup(stdscr, "Pull updates", "python3 /usr/local/lib/stacks_updates.py --pull")
                 stdscr.clear()
         elif tab == 7:  # Configs
             if k == curses.KEY_UP:
