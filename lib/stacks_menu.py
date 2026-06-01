@@ -995,6 +995,7 @@ def run_build_wizard(stdscr, new_stack=False):
                     state["companion_info"] = {"name":comp_name,"image":comp_img,"stack":comp_stack or state["target_stack"]}
 
 
+            step += 1
         elif current == "netvol":
             # ── Network/Volume questions ──────────────────────────────
             pct[0] = 75
