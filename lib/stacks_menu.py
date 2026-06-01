@@ -2179,11 +2179,9 @@ def main(stdscr):
         if k == curses.KEY_RIGHT:
             tab = (tab + 1) % len(TABS)
             sel = 0; scroll = 0
-            continue  # don't process tab-specific keys on same keypress
         elif k == curses.KEY_LEFT:
             tab = (tab - 1) % len(TABS)
             sel = 0; scroll = 0
-            continue  # don't process tab-specific keys on same keypress
 
         # Tab-specific keys - only process if not a tab-switch key
         if k in (curses.KEY_RIGHT, curses.KEY_LEFT):
