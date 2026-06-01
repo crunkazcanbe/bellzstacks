@@ -74,6 +74,14 @@ def load_conf():
         "FIX_REPLACE_BROKEN_HC": "0",  # set to 1 to replace actively-failing healthchecks
         "FIX_FORCE_HC": "0",           # set to 1 to replace ALL healthchecks
         "FIX_FORCE_HC_CONTAINERS": "",  # comma-separated containers to always force-update HC
+        "FIX_FORCE_NETWORKS": "0",     # 1 = re-inject networks even if already defined
+        "FIX_FORCE_VOLUMES": "0",      # 1 = re-inject volumes even if already defined
+        "FIX_EXTERNAL_NETWORKS": "1",  # 1 = generate external:true networks (default)
+        "FIX_EXTERNAL_VOLUMES": "1",   # 1 = generate external:true volumes (default)
+        "FIX_LOCAL_NETWORKS": "0",     # 1 = generate non-external local networks instead
+        "FIX_LOCAL_VOLUMES": "0",      # 1 = generate non-external local volumes instead
+        "FIX_INLINE_NETWORKS": "0",    # 1 = add networks directly in service file (not creator)
+        "FIX_INLINE_VOLUMES": "0",     # 1 = add volumes directly in service file (not creator)
         "FIX_STRIP_PROFILES": "1",  # set to 0 to disable auto-stripping of profiles: blocks
         "FIX_SKIP_FILES": "net_0-ext.yml",
         "FIX_HC_SKIP": "",
@@ -763,8 +771,11 @@ def net_definition(name, octet, subnet_base):
         f"gateway: {subnet_base}.{octet}.1}}]}}}}\n"
     )
 
-def vol_definition(name):
-    return f"  {name}: {{name: {name}, external: true}}\n"
+def vol_definition(name, external=True):
+    if external:
+        return f"  {name}: {{name: {name}, external: true}}\n"
+    else:
+        return f"  {name}: {{name: {name}, external: false}}\n"
 
 def find_provisioner_block(lines):
     """Return (start_idx, end_idx) of the first provisioner_* service block, or None."""
