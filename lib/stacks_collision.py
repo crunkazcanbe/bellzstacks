@@ -24,6 +24,102 @@ import os, re, glob, json, subprocess
 STACKS_DIR = "/srv/stacks/Stacks"
 CONF_FILE  = os.path.expanduser("~/.config/stacks/stacks.conf")
 
+# ── Host port scanner ────────────────────────────────────────────────────────
+def scan_host_ports():
+    """
+    Scan ports actually listening on the host via ss.
+    Returns {ip: set(ports)} for all listening ports.
+    ✔ Used to avoid assigning ports already bound on host
+    """
+    host_ports = {}
+    try:
+        r = subprocess.run(['ss', '-tlnp'], capture_output=True, text=True, timeout=5)
+        for line in r.stdout.splitlines():
+            # Format: LISTEN 0 N IP:PORT 0.0.0.0:*
+            m = re.search(r'([\d.]+):(\d+)\s+0\.0\.0\.0:\*', line)
+            if m:
+                ip, port = m.group(1), m.group(2)
+                if ip not in host_ports: host_ports[ip] = set()
+                host_ports[ip].add(port)
+    except: pass
+    return host_ports
+
+def is_port_free_on_host(ip, port):
+    """Check if ip:port is actually free on the host."""
+    host_ports = scan_host_ports()
+    port = str(port)
+    if ip in host_ports and port in host_ports[ip]:
+        return False
+    return True
+
+# ── Related container grouping ────────────────────────────────────────────────
+def get_related_containers(fpath):
+    """
+    Parse a compose file and group containers that reference each other.
+    Containers with depends_on, links, or shared env vars (DB_HOST, REDIS_HOST etc)
+    should share the same IP.
+    Returns list of sets, each set = group of related container names.
+    ✔ Used to keep app + db + redis on same IP
+    """
+    groups = []
+    try:
+        content = open(fpath).read()
+        # Find all services
+        services = re.findall(r'^\s{2}(\S+):\s*$', content, re.MULTILINE)
+        container_names = {}
+        for svc in services:
+            pattern2 = r"  " + re.escape(svc) + r":.*?container_name:\s*(\S+)"
+            m = re.search(pattern2, content, re.DOTALL)
+
+        # Find depends_on relationships
+        deps = {}
+        for svc in services:
+        pattern = r"  " + re.escape(svc) + r":(.*?)(?=\n  [a-zA-Z]|\Z)"
+        m = re.search(pattern, content, re.DOTALL)
+            if not m: continue
+            block = m.group(1)
+            dep_matches = re.findall(r'depends_on.*?(?:
+(?:    |\s{6})- (\S+)|
+\s+(\S+):\s*$)', block)
+            svc_deps = set()
+            # Also check env vars that reference other containers
+            env_refs = re.findall(r'(?:DB_HOST|REDIS_HOST|DATABASE_HOST|POSTGRES_HOST|MYSQL_HOST|MONGO_HOST)=(\S+)', block)
+            for ref in env_refs:
+                for s, cname in container_names.items():
+                    if ref == cname or ref == s:
+                        svc_deps.add(s)
+            if svc_deps: deps[svc] = svc_deps
+
+        # Build groups using union-find
+        def find_group(svc, all_groups):
+            for g in all_groups:
+                if svc in g: return g
+            return None
+
+        for svc, svc_deps in deps.items():
+            g = find_group(svc, groups)
+            if not g:
+                g = {svc}
+                groups.append(g)
+            for dep in svc_deps:
+                dg = find_group(dep, groups)
+                if dg and dg is not g:
+                    g.update(dg)
+                    groups.remove(dg)
+                else:
+                    g.add(dep)
+
+        # Convert service names to container names
+        named_groups = []
+        for g in groups:
+            named = set()
+            for svc in g:
+                named.add(container_names.get(svc, svc))
+            if len(named) > 1:
+                named_groups.append(named)
+        return named_groups
+    except: return []
+
 # ── Config ────────────────────────────────────────────────────────────────────
 def load_conf():
     """Load all relevant settings from stacks.conf."""
@@ -369,9 +465,14 @@ def find_ip_with_free_port(port):
             ips_to_try = [f"{prefix}.{i}" for i in range(start, end+1)]
         except: pass
 
+    host_ports = scan_host_ports()
+
     for ip in ips_to_try:
         if ip in blacklist_ips or ip in locked: continue
         if f"{ip}:{port}" not in used:
+            # Also check host is not already using this ip:port
+            if ip in host_ports and port in host_ports[ip]:
+                continue
             return ip, port
 
     return None, None
