@@ -825,28 +825,26 @@ def inject_depends_on(fpath, cfg):
             if len(group) > 8:
                 continue
 
-            # Build depends map: app -> [db, cache], worker -> [app]
+            # Build depends map: ONLY main app gets depends_on
+            # Main app = shortest name in group (coolify vs coolify-realtime)
+            # deps = all workers + dbs + caches that share prefix with app
             deps_map = {}
+
+            def shares_prefix(a, b):
+                """True if a and b share a meaningful name prefix."""
+                pa = a.split('-')[0].split('_')[0]
+                pb = b.split('-')[0].split('_')[0]
+                return pa == pb or a.startswith(pb) or b.startswith(pa)
+
             for app in apps:
-                # Only depend on dbs/caches that share a name prefix with app
-                related_dbs = [d for d in dbs if
-                    d.startswith(app.split('-')[0]) or
-                    d.startswith(app.split('_')[0]) or
-                    app.startswith(d.split('-')[0]) or
-                    app.startswith(d.split('_')[0])]
-                related_caches = [c for c in caches if
-                    c.startswith(app.split('-')[0]) or
-                    c.startswith(app.split('_')[0]) or
-                    app.startswith(c.split('-')[0]) or
-                    app.startswith(c.split('_')[0])]
-                # Fall back to all dbs/caches if no prefix match and group is small
-                if not related_dbs and not related_caches and len(group) <= 4:
-                    related_dbs = dbs
-                    related_caches = caches
-                deps = related_dbs + related_caches
-                if deps: deps_map[app] = deps
-            for worker in workers:
-                if apps: deps_map[worker] = apps
+                # Find workers/dbs/caches that belong to THIS app by prefix
+                my_workers = [w for w in workers if shares_prefix(app, w)]
+                my_dbs     = [d for d in dbs     if shares_prefix(app, d)]
+                my_caches  = [c for c in caches   if shares_prefix(app, c)]
+                deps = my_workers + my_dbs + my_caches
+                if deps:
+                    deps_map[app] = deps
+            # Workers do NOT get depends_on (only app does)
 
             for cname, dep_list in deps_map.items():
                 # Find container block
