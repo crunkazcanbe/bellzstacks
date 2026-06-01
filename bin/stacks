@@ -3237,6 +3237,87 @@ elif [ "$COMMAND" == "gen" ]; then
 elif [ "$COMMAND" == "fix" ]; then
   printf "\e[?25h"
   echo -e "\n\e[1;35m🔧 Running stack fixer...\e[0m"
+
+  # ── IP/Port collision fix ─────────────────────────────────────────────────
+  echo -e "\e[1;36m🔍 Scanning IP/port collisions...\e[0m"
+  python3 -W ignore /usr/local/lib/stacks_collision.py 2>/dev/null
+  echo -e "\e[1;36m🔧 Fixing IP/port collisions...\e[0m"
+  python3 -W ignore << 'COLFIX'
+import sys, re, glob
+sys.path.insert(0, '/usr/local/lib')
+from stacks_collision import (
+    get_collisions, find_ip_with_free_port,
+    is_locked_container, get_related_containers,
+    get_image_default_port, scan_all_ports
+)
+STACKS_DIR = '/srv/stacks/Stacks'
+ip_col, port_col = get_collisions()
+dupes = [c for c in port_col if c["type"] == "duplicate"]
+print(f"  Found {len(dupes)} duplicate IP:PORT collisions")
+fixed = skipped = 0
+# Track IP assignments per group to keep related containers together
+group_ips = {}  # group_id -> assigned_ip
+
+for col in dupes:
+    ip, port = col["ip"], col["port"]
+    owners = col["owners"]
+    for i, (stk, cname) in enumerate(owners):
+        if i == 0: continue  # keep first owner
+        if is_locked_container(cname):
+            print(f"  LOCKED: {cname} - skipping")
+            skipped += 1
+            continue
+        fpath = f"{STACKS_DIR}/{stk}.yml"
+        try:
+            data = open(fpath).read()
+        except:
+            skipped += 1
+            continue
+        # Check if container is in a group with known IP
+        groups = get_related_containers(fpath)
+        group_ip = None
+        for g in groups:
+            if cname in g:
+                gid = tuple(sorted(g))
+                if gid in group_ips:
+                    group_ip = group_ips[gid]
+                break
+        if group_ip:
+            new_ip = group_ip
+            new_port = find_ip_with_free_port(port)[1] or port
+        else:
+            new_ip, new_port = find_ip_with_free_port(port)
+            if not new_ip:
+                # Try image default port
+                img_m = re.search(r"container_name:\s*" + re.escape(cname) + r".*?image:\s*(\S+)", data, re.DOTALL)
+                if img_m:
+                    for p in get_image_default_port(img_m.group(1).strip()):
+                        new_ip, new_port = find_ip_with_free_port(p)
+                        if new_ip: break
+        if not new_ip:
+            print(f"  SKIP:  {cname:<30} no free IP found for port {port}")
+            skipped += 1
+            continue
+        # Store group IP assignment
+        for g in groups:
+            if cname in g:
+                group_ips[tuple(sorted(g))] = new_ip
+                break
+        # Apply fix
+        old_pat = f"{ip}:{port}"
+        new_pat = f"{new_ip}:{new_port}"
+        content = open(fpath).read()
+        if old_pat in content:
+            content = content.replace(old_pat, new_pat, 1)
+            open(fpath, "w").write(content)
+            print(f"  FIXED: {cname:<30} {old_pat} -> {new_pat}")
+            fixed += 1
+        else:
+            skipped += 1
+
+print(f"  Done: {fixed} fixed, {skipped} skipped")
+COLFIX
+  echo -e "\e[1;35m─────────────────────────────────────────\e[0m"
   if [ ${#PARSED_STACKS[@]} -gt 0 ]; then
     # Multiple stacks specified
     for _fidx in "${!PARSED_STACKS[@]}"; do
