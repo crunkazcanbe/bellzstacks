@@ -1845,7 +1845,7 @@ def inject_into_anchor(lines, gi, dry_run=False):
 
     _sg = gi.get('INJECT_STOP_GRACE','0')
     if _gi_enabled(_sg):
-        force = _gi_is_forced(gi, INJECT_STOP_GRACE)
+        force = _gi_is_forced(gi, 'INJECT_STOP_GRACE')
         period = gi.get('STOP_GRACE_PERIOD','120s')
         signal = gi.get('STOP_SIGNAL','SIGTERM')
         if force and 'stop_grace_period:' in block_text:
@@ -1863,7 +1863,7 @@ def inject_into_anchor(lines, gi, dry_run=False):
 
     _lg = gi.get('INJECT_LOGGING','0')
     if _gi_enabled(_lg):
-        force = _gi_is_forced(gi, INJECT_LOGGING)
+        force = _gi_is_forced(gi, 'INJECT_LOGGING')
         driver = gi.get('LOGGING_DRIVER','json-file')
         maxsize = gi.get('LOGGING_MAX_SIZE','50m')
         maxfile = gi.get('LOGGING_MAX_FILE','5')
@@ -1877,7 +1877,7 @@ def inject_into_anchor(lines, gi, dry_run=False):
 
     _rs = gi.get('INJECT_RESTART','0')
     if _gi_enabled(_rs):
-        force = _gi_is_forced(gi, INJECT_RESTART)
+        force = _gi_is_forced(gi, 'INJECT_RESTART')
         policy = gi.get('RESTART_POLICY','unless-stopped')
         if force and 'restart:' in block_text:
             new_lines = [re.sub(r'^  restart:.*', f"  restart: {policy}", l) for l in new_lines]
@@ -1909,7 +1909,7 @@ def inject_global_keys(lines, svc, gi, dry_run=False):
 
     _sg = gi.get('INJECT_STOP_GRACE','0')
     if _gi_enabled(_sg):
-        force = _gi_is_forced(gi, INJECT_STOP_GRACE)
+        force = _gi_is_forced(gi, 'INJECT_STOP_GRACE')
         if force or 'stop_grace_period:' not in block_text:
             if force:
                 new_lines = [re.sub(r'^    stop_grace_period:.*', f"    stop_grace_period: {gi.get('STOP_GRACE_PERIOD','120s')}", l) for l in new_lines]
@@ -1925,7 +1925,7 @@ def inject_global_keys(lines, svc, gi, dry_run=False):
 
     _lg = gi.get('INJECT_LOGGING','0')
     if _gi_enabled(_lg):
-        force = _gi_is_forced(gi, INJECT_LOGGING)
+        force = _gi_is_forced(gi, 'INJECT_LOGGING')
         driver = gi.get('LOGGING_DRIVER','json-file')
         maxsize = gi.get('LOGGING_MAX_SIZE','50m')
         maxfile = gi.get('LOGGING_MAX_FILE','5')
@@ -1981,7 +1981,7 @@ def inject_global_keys(lines, svc, gi, dry_run=False):
 
     _rs = gi.get('INJECT_RESTART','0')
     if _gi_enabled(_rs):
-        force = _gi_is_forced(gi, INJECT_RESTART)
+        force = _gi_is_forced(gi, 'INJECT_RESTART')
         policy = gi.get('RESTART_POLICY','unless-stopped')
         if force or 'restart:' not in block_text:
             if force and 'restart:' in block_text:
