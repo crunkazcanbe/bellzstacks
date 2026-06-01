@@ -2228,6 +2228,37 @@ def main():
             pr(f"\n{C}🔧 {stack_name}{X}")
             total += fix_healthchecks(f, cfg, svc, dry_run, replace_broken)
 
+    # ── Phase 3.4: Container name normalization ─────────────────────────────
+    # Replaces . and _ with - in container_name, hostname, domainname
+    if on(cfg.get("FIX_NORMALIZE_NAMES", "0")):
+        pr(f"\n{C}🏷️  Normalizing container names (._  ->  -){X}")
+        _norm_fixed = 0
+        for f in files:
+            try:
+                data = open(f).read()
+                new_data = data
+                # Find all container_name values and normalize
+                for match in re.finditer(r'(container_name:\s*)(\S+)', data):
+                    old_name = match.group(2).strip('"\' ')
+                    new_name = old_name.replace('.','-').replace('_','-')
+                    if new_name == old_name: continue
+                    if dry_run:
+                        pr(f"  {Y}[dry] {old_name} -> {new_name}{X}")
+                    else:
+                        # Replace ALL occurrences of old_name in file
+                        new_data = re.sub(
+                            r'\b' + re.escape(old_name) + r'\b',
+                            new_name, new_data
+                        )
+                    _norm_fixed += 1
+                if not dry_run and new_data != data:
+                    open(f, "w").write(new_data)
+            except Exception as _e:
+                pr(f"  {R}✘ {os.path.basename(f)}: {_e}{X}")
+        if _norm_fixed == 0:
+            pr(f"  {G}✔ All names already normalized{X}")
+        total += _norm_fixed
+
     # ── Phase 3.5: depends_on injection ──────────────────────────────────────
     if on(cfg.get("FIX_AUTO_DEPENDS", "0")):
         pr(f"\n{C}🔗 Injecting depends_on for related containers{X}")
