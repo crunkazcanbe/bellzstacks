@@ -1,29 +1,203 @@
 #!/usr/bin/env python3
 """
-stacks_collision.py — IP and port collision detection
+stacks_collision.py — IP and port collision detection + assignment
+═══════════════════════════════════════════════════════════════════
+PUBLIC FUNCTIONS (importable):
+  ✔ load_conf()                    — load stacks.conf settings
+  ✔ scan_all_ips()                 — {ip: [(stack,container)]}
+  ✔ scan_all_ports()               — {port: [(stack,container)]}
+  ✔ get_collisions()               — (ip_collisions, port_collisions)
+  ✔ get_next_available_ip()        — next free IP in range
+  ✔ get_next_available_port(ip)    — next free port for a given IP
+  ✔ get_image_default_port(image)  — inspect image for ExposedPorts
+  ✔ is_locked_container(name)      — check if container is locked
+  ✔ is_network_mode_host(fpath,svc)— check if service uses network_mode: host
+  ✔ validate_ip(ip)                — check IP against range/blacklist/whitelist
+  ✔ validate_port(port)            — check port against range/blacklist
+  ✔ add_ip_blacklist(ip)           — add IP to blacklist in stacks.conf
+  ✔ add_ip_whitelist(ip)           — add IP to whitelist in stacks.conf
+  ✔ add_port_blacklist(port)       — add port to blacklist in stacks.conf
+  ✔ add_locked_container(name)     — add container to locked list
 """
-import os, re, glob
+import os, re, glob, json, subprocess
 
 STACKS_DIR = "/srv/stacks/Stacks"
 CONF_FILE  = os.path.expanduser("~/.config/stacks/stacks.conf")
 
+# ── Config ────────────────────────────────────────────────────────────────────
 def load_conf():
+    """Load all relevant settings from stacks.conf."""
     cfg = {
-        "IP_RANGE_START": "192.168.1.200",
-        "IP_RANGE_END":   "192.168.1.253",
-        "IP_BLACKLIST":   "192.168.1.1,192.168.1.114,192.168.1.151",
-        "IP_WHITELIST":   "",
-        "PORT_BLACKLIST": "22,80,443,3306,5432,6379,27017",
+        "IP_RANGE_START":            "192.168.1.153",
+        "IP_RANGE_END":              "192.168.1.253",
+        "PORT_RANGE_START":          "8080",
+        "PORT_RANGE_END":            "8999",
+        "IP_BLACKLIST":              "192.168.1.1,192.168.1.114,192.168.1.151",
+        "IP_WHITELIST":              "",
+        "PORT_BLACKLIST":            "22,80,443,3306,5432,6379,27017,2375,2376",
+        "LOCKED_IPS":                "",
+        "IP_PORT_LOCKED_CONTAINERS": "cloudflared,cloudflared_tunnel_core,cloudflared-doh,traefik,sablier",
+        "NETWORK_MODE_SKIP":         "1",
     }
     try:
         for line in open(CONF_FILE):
             l = line.strip()
             if "=" in l and not l.startswith("#"):
                 k, v = l.split("=", 1)
-                cfg[k.strip()] = v.strip().strip('"')
+                cfg[k.strip()] = v.strip().strip('"\'')
     except: pass
     return cfg
 
+def _update_conf(key, value):
+    """Update or add a key in stacks.conf."""
+    try:
+        lines = open(CONF_FILE).readlines()
+        found = False
+        for i, l in enumerate(lines):
+            if re.match(rf'^{key}\s*=', l.strip()):
+                lines[i] = f'{key}="{value}"\n'
+                found = True
+                break
+        if not found:
+            lines.append(f'{key}="{value}"\n')
+        open(CONF_FILE, 'w').writelines(lines)
+        return True
+    except: return False
+
+# ── Blacklist/Whitelist management ────────────────────────────────────────────
+def add_ip_blacklist(ip):
+    """Add an IP to IP_BLACKLIST in stacks.conf."""
+    cfg = load_conf()
+    bl = [x.strip() for x in cfg["IP_BLACKLIST"].split(",") if x.strip()]
+    if ip not in bl:
+        bl.append(ip)
+        _update_conf("IP_BLACKLIST", ",".join(bl))
+    return bl
+
+def add_ip_whitelist(ip):
+    """Add an IP to IP_WHITELIST in stacks.conf."""
+    cfg = load_conf()
+    wl = [x.strip() for x in cfg["IP_WHITELIST"].split(",") if x.strip()]
+    if ip not in wl:
+        wl.append(ip)
+        _update_conf("IP_WHITELIST", ",".join(wl))
+    return wl
+
+def add_port_blacklist(port):
+    """Add a port to PORT_BLACKLIST in stacks.conf."""
+    cfg = load_conf()
+    bl = [x.strip() for x in cfg["PORT_BLACKLIST"].split(",") if x.strip()]
+    port = str(port)
+    if port not in bl:
+        bl.append(port)
+        _update_conf("PORT_BLACKLIST", ",".join(bl))
+    return bl
+
+def add_locked_container(name):
+    """Add a container name to IP_PORT_LOCKED_CONTAINERS."""
+    cfg = load_conf()
+    locked = [x.strip() for x in cfg["IP_PORT_LOCKED_CONTAINERS"].split(",") if x.strip()]
+    if name not in locked:
+        locked.append(name)
+        _update_conf("IP_PORT_LOCKED_CONTAINERS", ",".join(locked))
+    return locked
+
+# ── Validation ────────────────────────────────────────────────────────────────
+def validate_ip(ip):
+    """
+    Check IP against range, blacklist, whitelist.
+    Returns (valid:bool, reason:str)
+    """
+    cfg = load_conf()
+    blacklist = set(x.strip() for x in cfg["IP_BLACKLIST"].split(",") if x.strip())
+    locked    = set(x.strip() for x in cfg["LOCKED_IPS"].split(",") if x.strip())
+    whitelist = [x.strip() for x in cfg["IP_WHITELIST"].split(",") if x.strip()]
+
+    if ip in blacklist: return False, "blacklisted"
+    if ip in locked:    return False, "locked"
+
+    if whitelist:
+        if ip in whitelist: return True, "whitelisted"
+        return False, "not in whitelist"
+
+    # Check range
+    try:
+        start = int(cfg["IP_RANGE_START"].split(".")[-1])
+        end   = int(cfg["IP_RANGE_END"].split(".")[-1])
+        prefix = ".".join(cfg["IP_RANGE_START"].split(".")[:3])
+        last = int(ip.split(".")[-1])
+        ip_prefix = ".".join(ip.split(".")[:3])
+        if ip_prefix != prefix:
+            return False, f"wrong subnet (expected {prefix}.x)"
+        if start <= last <= end:
+            return True, "in range"
+        return False, f"out of range ({cfg['IP_RANGE_START']}-{cfg['IP_RANGE_END']})"
+    except: return False, "invalid format"
+
+def validate_port(port):
+    """
+    Check port against blacklist and range.
+    Returns (valid:bool, reason:str)
+    """
+    cfg = load_conf()
+    port = str(port)
+    blacklist = set(x.strip() for x in cfg["PORT_BLACKLIST"].split(",") if x.strip())
+    if port in blacklist: return False, "blacklisted"
+    try:
+        p = int(port)
+        start = int(cfg["PORT_RANGE_START"])
+        end   = int(cfg["PORT_RANGE_END"])
+        if start <= p <= end: return True, "in range"
+        # Allow outside range if not blacklisted
+        return True, "outside range but not blacklisted"
+    except: return False, "invalid format"
+
+# ── Container checks ──────────────────────────────────────────────────────────
+def is_locked_container(name):
+    """Return True if container name is in locked list."""
+    cfg = load_conf()
+    locked = set(x.strip() for x in cfg["IP_PORT_LOCKED_CONTAINERS"].split(",") if x.strip())
+    # Check exact match or partial (e.g. 'cloudflared' matches 'cloudflared-doh')
+    if name in locked: return True
+    for l in locked:
+        if l in name or name in l: return True
+    return False
+
+def is_network_mode_host(fpath, svc_name):
+    """Return True if service uses network_mode: host."""
+    try:
+        content = open(fpath).read()
+        # Find service block
+        m = re.search(rf'container_name:\s*{re.escape(svc_name)}(.*?)(?=\n  [a-zA-Z]|\Z)', content, re.DOTALL)
+        if m and 'network_mode' in m.group(1) and 'host' in m.group(1):
+            return True
+    except: pass
+    return False
+
+# ── Image inspection ──────────────────────────────────────────────────────────
+def get_image_default_port(image):
+    """
+    Inspect Docker image for ExposedPorts.
+    Returns list of port numbers (strings) or empty list.
+    """
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .Config.ExposedPorts}}", image],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode != 0: return []
+        data = json.loads(r.stdout.strip())
+        if not data: return []
+        ports = []
+        for key in data.keys():
+            # key format: "8080/tcp" or "8080/udp"
+            port = key.split("/")[0]
+            if port.isdigit():
+                ports.append(port)
+        return sorted(ports, key=int)
+    except: return []
+
+# ── Scanning ──────────────────────────────────────────────────────────────────
 def scan_all_ips():
     """Return {ip: [(stack, container)]} for all stacks."""
     ip_map = {}
@@ -31,47 +205,54 @@ def scan_all_ips():
         stack = os.path.basename(fpath).replace(".yml","")
         try:
             content = open(fpath).read()
-            # Find container_name + ipv4_address pairs
-            services = re.findall(
-                r'container_name:\s*(\S+).*?ipv4_address:\s*([\d.]+)',
-                content, re.DOTALL
-            )
-            for cname, ip in services:
-                if ip not in ip_map:
-                    ip_map[ip] = []
-                ip_map[ip].append((stack, cname))
+            # Match ports like "192.168.1.x:port:port"
+            for m in re.finditer(r'container_name:\s*(\S+)', content):
+                cname = m.group(1)
+                # Find IPs near this container
+                block_start = m.start()
+                # Get next 50 lines
+                block = content[block_start:block_start+2000]
+                for ip_m in re.finditer(r'(192\.168\.1\.\d+):\d+:\d+', block):
+                    ip = ip_m.group(1)
+                    if ip not in ip_map: ip_map[ip] = []
+                    entry = (stack, cname)
+                    if entry not in ip_map[ip]:
+                        ip_map[ip].append(entry)
         except: pass
     return ip_map
 
 def scan_all_ports():
-    """Return {port: [(stack, container)]} for all stacks."""
+    """Return {host_port: [(stack, container, ip)]} for all stacks."""
     port_map = {}
     for fpath in sorted(glob.glob(f"{STACKS_DIR}/*.yml")):
         stack = os.path.basename(fpath).replace(".yml","")
         try:
             content = open(fpath).read()
-            # Find container_name + port mappings
-            blocks = re.findall(
-                r'container_name:\s*(\S+)(.*?)(?=\n  [a-zA-Z]|\Z)',
-                content, re.DOTALL
-            )
-            for cname, block in blocks:
-                ports = re.findall(r'[\d.]+:(\d+):\d+', block)
-                for port in ports:
-                    if port not in port_map:
-                        port_map[port] = []
-                    port_map[port].append((stack, cname))
+            for m in re.finditer(r'container_name:\s*(\S+)', content):
+                cname = m.group(1)
+                block_start = m.start()
+                block = content[block_start:block_start+2000]
+                for port_m in re.finditer(r'(192\.168\.1\.\d+):(\d+):\d+', block):
+                    ip = port_m.group(1)
+                    port = port_m.group(2)
+                    key = f"{ip}:{port}"
+                    if key not in port_map: port_map[key] = []
+                    entry = (stack, cname)
+                    if entry not in port_map[key]:
+                        port_map[key].append(entry)
         except: pass
     return port_map
 
 def get_collisions():
-    """Return lists of IP and port collisions."""
-    ip_map = scan_all_ips()
-    port_map = scan_all_ports()
+    """
+    Scan all stacks for IP and port collisions.
+    Returns (ip_collisions, port_collisions) lists of dicts.
+    """
     cfg = load_conf()
-
-    blacklist_ips = set(cfg["IP_BLACKLIST"].split(","))
-    blacklist_ports = set(cfg["PORT_BLACKLIST"].split(","))
+    ip_map   = scan_all_ips()
+    port_map = scan_all_ports()
+    blacklist_ips   = set(x.strip() for x in cfg["IP_BLACKLIST"].split(",") if x.strip())
+    blacklist_ports = set(x.strip() for x in cfg["PORT_BLACKLIST"].split(",") if x.strip())
 
     ip_collisions = []
     for ip, owners in ip_map.items():
@@ -81,46 +262,147 @@ def get_collisions():
             ip_collisions.append({"ip": ip, "owners": owners, "type": "blacklisted"})
 
     port_collisions = []
-    for port, owners in port_map.items():
+    for key, owners in port_map.items():
+        ip, port = key.split(":", 1)
         if len(owners) > 1:
-            port_collisions.append({"port": port, "owners": owners, "type": "duplicate"})
+            port_collisions.append({"ip": ip, "port": port, "owners": owners, "type": "duplicate"})
         elif port in blacklist_ports:
-            port_collisions.append({"port": port, "owners": owners, "type": "blacklisted"})
+            port_collisions.append({"ip": ip, "port": port, "owners": owners, "type": "blacklisted"})
 
     return ip_collisions, port_collisions
 
+# ── Assignment ────────────────────────────────────────────────────────────────
 def get_next_available_ip():
-    """Get next available IP respecting range, blacklist, whitelist."""
+    """
+    Get next available IP respecting range, blacklist, whitelist, locked.
+    Returns IP string or None.
+    """
     cfg = load_conf()
-    ip_map = scan_all_ips()
-    used = set(ip_map.keys())
-    blacklist = set(cfg["IP_BLACKLIST"].split(","))
+    ip_map    = scan_all_ips()
+    used      = set(ip_map.keys())
+    blacklist = set(x.strip() for x in cfg["IP_BLACKLIST"].split(",") if x.strip())
+    locked    = set(x.strip() for x in cfg["LOCKED_IPS"].split(",") if x.strip())
     whitelist = [x.strip() for x in cfg["IP_WHITELIST"].split(",") if x.strip()]
+    blocked   = used | blacklist | locked
 
     if whitelist:
         for ip in whitelist:
-            if ip not in used and ip not in blacklist:
+            if ip not in blocked:
                 return ip
         return None
 
-    # Use range
     try:
-        start = int(cfg["IP_RANGE_START"].split(".")[-1])
-        end   = int(cfg["IP_RANGE_END"].split(".")[-1])
+        start  = int(cfg["IP_RANGE_START"].split(".")[-1])
+        end    = int(cfg["IP_RANGE_END"].split(".")[-1])
         prefix = ".".join(cfg["IP_RANGE_START"].split(".")[:3])
         for i in range(start, end+1):
             ip = f"{prefix}.{i}"
-            if ip not in used and ip not in blacklist:
+            if ip not in blocked:
                 return ip
     except: pass
     return None
 
+def get_next_available_port(ip, preferred_port=None):
+    """
+    Get next available port for a given IP.
+    Tries preferred_port first, then scans PORT_RANGE_START to PORT_RANGE_END.
+    Returns port string or None.
+    """
+    cfg = load_conf()
+    port_map  = scan_all_ports()
+    blacklist = set(x.strip() for x in cfg["PORT_BLACKLIST"].split(",") if x.strip())
+
+    # Build set of used ports for this IP
+    used_ports = set()
+    for key, owners in port_map.items():
+        k_ip, k_port = key.split(":", 1)
+        if k_ip == ip:
+            used_ports.add(k_port)
+
+    # Try preferred port first
+    if preferred_port:
+        p = str(preferred_port)
+        if p not in used_ports and p not in blacklist:
+            return p
+
+    # Scan range
+    try:
+        start = int(cfg["PORT_RANGE_START"])
+        end   = int(cfg["PORT_RANGE_END"])
+        for port in range(start, end+1):
+            p = str(port)
+            if p not in used_ports and p not in blacklist:
+                return p
+    except: pass
+    return None
+
+def find_ip_with_free_port(port):
+    """
+    Given a desired port, find an IP where that port is free.
+    This is the core logic for the fix script:
+    - Try each IP in range
+    - Return first IP where port is not already used
+    Returns (ip, port) or (None, None)
+    """
+    cfg = load_conf()
+    port_map  = scan_all_ports()
+    blacklist_ips   = set(x.strip() for x in cfg["IP_BLACKLIST"].split(",") if x.strip())
+    blacklist_ports = set(x.strip() for x in cfg["PORT_BLACKLIST"].split(",") if x.strip())
+    locked    = set(x.strip() for x in cfg["LOCKED_IPS"].split(",") if x.strip())
+    whitelist = [x.strip() for x in cfg["IP_WHITELIST"].split(",") if x.strip()]
+    port = str(port)
+
+    if port in blacklist_ports:
+        return None, None
+
+    # Build used ip:port set
+    used = set(port_map.keys())
+
+    ips_to_try = []
+    if whitelist:
+        ips_to_try = whitelist
+    else:
+        try:
+            start  = int(cfg["IP_RANGE_START"].split(".")[-1])
+            end    = int(cfg["IP_RANGE_END"].split(".")[-1])
+            prefix = ".".join(cfg["IP_RANGE_START"].split(".")[:3])
+            ips_to_try = [f"{prefix}.{i}" for i in range(start, end+1)]
+        except: pass
+
+    for ip in ips_to_try:
+        if ip in blacklist_ips or ip in locked: continue
+        if f"{ip}:{port}" not in used:
+            return ip, port
+
+    return None, None
+
 if __name__ == "__main__":
+    import sys
+    cfg = load_conf()
+    print(f"IP Range:  {cfg['IP_RANGE_START']} → {cfg['IP_RANGE_END']}")
+    print(f"Port Range: {cfg['PORT_RANGE_START']} → {cfg['PORT_RANGE_END']}")
+    print(f"Blacklist IPs:  {cfg['IP_BLACKLIST']}")
+    print(f"Blacklist Ports:{cfg['PORT_BLACKLIST']}")
+    print(f"Locked containers: {cfg['IP_PORT_LOCKED_CONTAINERS']}")
+    print()
     ip_col, port_col = get_collisions()
     print(f"IP collisions:   {len(ip_col)}")
-    for c in ip_col:
+    for c in ip_col[:5]:
         print(f"  {c['type']:12} {c['ip']:18} {c['owners']}")
     print(f"Port collisions: {len(port_col)}")
-    for c in port_col:
-        print(f"  {c['type']:12} {c['port']:8} {c['owners']}")
-    print(f"\nNext available IP: {get_next_available_ip()}")
+    for c in port_col[:5]:
+        print(f"  {c['type']:12} {c['ip']}:{c['port']:8} {c['owners']}")
+    print()
+    next_ip = get_next_available_ip()
+    print(f"Next available IP: {next_ip}")
+    next_port = get_next_available_port(next_ip) if next_ip else None
+    print(f"Next available port on {next_ip}: {next_port}")
+    print()
+    # Test image port detection
+    if len(sys.argv) > 1:
+        img = sys.argv[1]
+        ports = get_image_default_port(img)
+        print(f"Default ports for {img}: {ports}")
+    # Test find_ip_with_free_port
+    print(f"IP with free port 8080: {find_ip_with_free_port('8080')}")
+    print(f"IP with free port 8443: {find_ip_with_free_port('8443')}")
