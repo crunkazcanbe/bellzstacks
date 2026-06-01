@@ -2130,6 +2130,8 @@ def main(stdscr):
             nr = sum(1 for c in app_data['containers'] if c.get('state','').lower()=='running')
         title = f'  ✦ STACKSSTACKS  ·  {nr}/{nc} running  ·  {now}  '
         draw_header(stdscr, title, w)
+        with open("/tmp/tab_live.txt","w") as _f: _f.write(f"tab={tab} {TABS[tab] if tab < len(TABS) else chr(63)}\n")
+        with open("/tmp/tab_live.txt","w") as _f: _f.write(f"tab={tab} {TABS[tab] if tab < len(TABS) else chr(63)}\n")
 
         # Tabs
         draw_tabs(stdscr, 2, w, TABS, tab)
@@ -2370,15 +2372,23 @@ def main(stdscr):
                     run_log_popup(stdscr, 'Repair ALL', f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}')
 
         elif tab == 8:  # Network
-            if k in (10, 13, ord("s"), ord("S")):
+            if k == curses.KEY_RIGHT:
+                tab = (tab + 1) % len(TABS); sel = 0; scroll = 0
+            elif k == curses.KEY_LEFT:
+                tab = (tab - 1) % len(TABS); sel = 0; scroll = 0
+            elif k in (10, 13, ord("s"), ord("S")):
                 run_log_popup(stdscr, "Scan collisions", "python3 /usr/local/lib/stacks_collision.py")
                 stdscr.clear()
             elif k in (ord("e"), ord("E")):
                 curses.endwin()
-                os.system(f'{os.environ.get("EDITOR","nano")} {os.path.expanduser("~/.config/stacks/stacks.conf")}' )
+                os.system(f'{os.environ.get("EDITOR","nano")} {os.path.expanduser("~/.config/stacks/stacks.conf")}')
                 stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
         elif tab == 9:  # Updates
-            if k in (ord("c"), ord("C")):
+            if k == curses.KEY_RIGHT:
+                tab = (tab + 1) % len(TABS); sel = 0; scroll = 0
+            elif k == curses.KEY_LEFT:
+                tab = (tab - 1) % len(TABS); sel = 0; scroll = 0
+            elif k in (ord("c"), ord("C")):
                 run_log_popup(stdscr, "Check updates", "python3 /usr/local/lib/stacks_updates.py")
                 stdscr.clear()
             elif k in (ord("f"), ord("F")):
