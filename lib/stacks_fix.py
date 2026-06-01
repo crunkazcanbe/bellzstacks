@@ -82,6 +82,8 @@ def load_conf():
         "FIX_LOCAL_VOLUMES": "0",      # 1 = generate non-external local volumes instead
         "FIX_INLINE_NETWORKS": "0",    # 1 = add networks directly in service file (not creator)
         "FIX_INLINE_VOLUMES": "0",     # 1 = add volumes directly in service file (not creator)
+        "FIX_AUTO_DEPENDS": "0",       # 1 = auto-inject depends_on for related containers (app->db->redis)
+        "FIX_FORCE_DEPENDS": "0",      # 1 = re-inject depends_on even if already exists
         "FIX_STRIP_PROFILES": "1",  # set to 0 to disable auto-stripping of profiles: blocks
         "FIX_SKIP_FILES": "net_0-ext.yml",
         "FIX_HC_SKIP": "",
@@ -758,6 +760,116 @@ def collect_service_refs(stacks_dir, creators, skip_files=None):
             needed_vols.add(vol)
 
     return needed_nets, needed_vols
+
+# ── Depends-on injection ─────────────────────────────────────────────────────
+DB_SUFFIXES = ('-db', '-database', '-postgres', '-mysql', '-mongo', '-mariadb',
+               '_db', '_database', '_postgres', '_mysql', '_mongo', '_mariadb',
+               '-sqlite', '-clickhouse', '-cassandra', '-couchdb', '-dynamodb')
+CACHE_SUFFIXES = ('-redis', '-cache', '-memcached', '-valkey', '_redis', '_cache')
+WORKER_SUFFIXES = ('-worker', '-celery', '-beat', '-scheduler', '_worker', '_celery')
+
+def classify_container(name):
+    """Classify container role: db, cache, worker, or app."""
+    n = name.lower()
+    for s in DB_SUFFIXES:
+        if n.endswith(s) or s[1:] in n: return 'db'
+    for s in CACHE_SUFFIXES:
+        if n.endswith(s) or s[1:] in n: return 'cache'
+    for s in WORKER_SUFFIXES:
+        if n.endswith(s): return 'worker'
+    return 'app'
+
+def inject_depends_on(fpath, cfg):
+    """
+    Auto-inject depends_on for related containers in a compose file.
+    Apps depend on their db and cache.
+    Workers depend on the app.
+    Only injects if FIX_AUTO_DEPENDS=1 in config.
+    """
+    if cfg.get("FIX_AUTO_DEPENDS","0") != "1":
+        return []
+    force = cfg.get("FIX_FORCE_DEPENDS","0") == "1"
+    notes = []
+    try:
+        import sys as _sys
+        _sys.path.insert(0, '/usr/local/lib')
+        from stacks_collision import get_related_containers
+        groups = get_related_containers(fpath)
+        if not groups: return []
+
+        lines = open(fpath).readlines()
+        content = "".join(lines)
+
+        for group in groups:
+            # Classify each member
+            roles = {name: classify_container(name) for name in group}
+            apps    = [n for n,r in roles.items() if r == 'app']
+            dbs     = [n for n,r in roles.items() if r == 'db']
+            caches  = [n for n,r in roles.items() if r == 'cache']
+            workers = [n for n,r in roles.items() if r == 'worker']
+
+            # Build depends map: app -> [db, cache], worker -> [app]
+            deps_map = {}
+            for app in apps:
+                deps = dbs + caches
+                if deps: deps_map[app] = deps
+            for worker in workers:
+                if apps: deps_map[worker] = apps
+
+            for cname, dep_list in deps_map.items():
+                # Find container block
+                idx = content.find(f"container_name: {cname}")
+                if idx < 0: continue
+
+                # Check if already has depends_on
+                block_end = content.find("\n  ", idx+1)
+                if block_end < 0: block_end = len(content)
+                block = content[idx:idx+2000]
+                if "depends_on" in block and not force:
+                    continue
+
+                # Find line number of container_name
+                line_num = content[:idx].count("\n")
+
+                # Find insertion point - after image: line or after container_name
+                insert_after = None
+                for i in range(line_num, min(line_num+30, len(lines))):
+                    if re.match(r"    image:\s*", lines[i]):
+                        insert_after = i
+                        break
+                if insert_after is None:
+                    insert_after = line_num + 1
+
+                # Build depends_on block
+                dep_lines = ["    depends_on:\n"]
+                for dep in dep_list:
+                    dep_lines.append(f"      - {dep}\n")
+
+                # Remove existing depends_on if force
+                if force and "depends_on" in block:
+                    new_lines = []
+                    in_deps = False
+                    for i, l in enumerate(lines):
+                        if i < line_num: new_lines.append(l); continue
+                        if "depends_on:" in l and i > line_num: in_deps = True; continue
+                        if in_deps:
+                            if re.match(r"      - ", l): continue
+                            else: in_deps = False
+                        new_lines.append(l)
+                    lines = new_lines
+                    content = "".join(lines)
+                    line_num = content[:content.find(f"container_name: {cname}")].count("\n")
+                    insert_after = line_num + 1
+
+                lines = lines[:insert_after+1] + dep_lines + lines[insert_after+1:]
+                content = "".join(lines)
+                notes.append(f"depends_on: {cname} -> {dep_list}")
+
+        if notes:
+            open(fpath, "w").writelines(lines)
+    except Exception as e:
+        notes.append(f"depends_on error: {e}")
+    return notes
 
 # ── Network/volume definition templates ────────────────────────────────────────
 def net_definition(name, octet, subnet_base):
@@ -1832,6 +1944,15 @@ def main():
 
     target = args[0] if args else 'all'
     svc    = args[1] if len(args) > 1 else None
+    # Build files list early so all phases can use it
+    if target in ("all", "--all"):
+        files = sorted(os.path.join(sd, f) for f in os.listdir(sd)
+                       if f.endswith((".yml", ".yaml")))
+    else:
+        _fname = target if target.endswith((".yml",".yaml")) else target+".yml"
+        _fpath = os.path.join(sd, _fname)
+        files = [_fpath] if os.path.isfile(_fpath) else []
+
 
     pr(f"\n{M}╔══════════════════════════════════════╗{X}")
     pr(f"{M}║   🔧 STACKS STACK FIXER               ║{X}")
@@ -1875,7 +1996,7 @@ def main():
     # Adds/fixes "name: stackname" at top of each compose file
     if on(cfg.get("FIX_AUTO_NAME", "1")):
         for f in files:
-            stack_name = _os.path.basename(f).replace('.yml','').replace('.yaml','')
+            stack_name = os.path.basename(f).replace('.yml','').replace('.yaml','')
             lines = open(f).read().split('\n')
             # Check if name: already correct at top
             has_name = False
@@ -1911,7 +2032,7 @@ def main():
         _rfixes = _rmod.repair_file(_rf, dry_run=dry_run)
         if _rfixes:
             for _fix in _rfixes:
-                pr(f"  {G}✔ {_os.path.basename(_rf)}: {_fix}{X}")
+                pr(f"  {G}✔ {os.path.basename(_rf)}: {_fix}{X}")
             total += len(_rfixes)
 
     # ── Phase 0.5b: Legacy corruption repair ─────────────────────────────────
@@ -1952,7 +2073,7 @@ def main():
         content = '\n'.join(result)
         if content != original:
             open(f, 'w').write(content)
-            pr(f"  {G}✔ Repaired corruption in {_os.path.basename(f)}{X}")
+            pr(f"  {G}✔ Repaired corruption in {os.path.basename(f)}{X}")
 
     if _repair_changes > 0:
         total += _repair_changes
@@ -2006,6 +2127,27 @@ def main():
             stack_name = os.path.basename(f).replace('.yml', '').replace('.yaml', '')
             pr(f"\n{C}🔧 {stack_name}{X}")
             total += fix_healthchecks(f, cfg, svc, dry_run, replace_broken)
+
+    # ── Phase 3.5: depends_on injection ──────────────────────────────────────
+    if on(cfg.get("FIX_AUTO_DEPENDS", "0")):
+        pr(f"\n{C}🔗 Injecting depends_on for related containers{X}")
+        _deps_fixed = 0
+        _dep_files = sorted(os.path.join(sd, f) for f in os.listdir(sd)
+                     if f.endswith(".yml") or f.endswith(".yaml")) \
+                     if target in ("all","--all") else \
+                     [os.path.join(sd, target if target.endswith((".yml",".yaml")) else target+".yml")]
+        for f in _dep_files:
+            if svc and svc not in open(f).read(): continue
+            _notes = inject_depends_on(f, cfg)
+            for note in _notes:
+                if "error" in note.lower():
+                    pr(f"  {R}✘ {os.path.basename(f)}: {note}{X}")
+                else:
+                    pr(f"  {G}✔ {os.path.basename(f)}: {note}{X}")
+                    _deps_fixed += 1
+        if _deps_fixed == 0:
+            pr(f"  {G}✔ No missing depends_on found{X}")
+        total += _deps_fixed
 
 
     _files = files  # alias for phase 4/5
