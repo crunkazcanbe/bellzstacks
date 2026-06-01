@@ -2297,28 +2297,24 @@ def post_build_inject_volume(fpath, svc_name, cfg=None):
 def post_build_inject(fpath, svc_name, cfg=None):
     """
     Single callable for post-build injection.
-    Runs stacks fix phases on just this stack file so
-    networks, volumes, healthchecks etc all get handled
-    exactly the same way as running stacks fix manually.
+    Only adds networks and volumes - nothing else.
+    Run stacks fix separately for healthchecks, depends_on etc.
+    Config option BUILD_RUN_FIX=1 to run full fix after build.
     """
     if cfg is None: cfg = load_conf()
     notes = []
-    # First do the network injection (adds to creator file too)
     notes += post_build_inject_network(fpath, svc_name, cfg)
-    # Then run fix phases on this stack only
-    import subprocess as _sp, os as _os
-    stack = _os.path.basename(fpath).replace('.yml','').replace('.yaml','')
-    try:
-        r = _sp.run(
-            ['python3', '/usr/local/lib/stacks_fix.py', stack],
-            capture_output=True, text=True, timeout=60
-        )
-        if r.returncode == 0:
-            notes.append(f"fix ran on {stack}")
-        else:
-            notes.append(f"fix error: {r.stderr[:100]}")
-    except Exception as e:
-        notes.append(f"fix error: {e}")
+    notes += post_build_inject_volume(fpath, svc_name, cfg)
+    # Optional: run full fix if config says so
+    if cfg.get("BUILD_RUN_FIX","0") == "1":
+        import subprocess as _sp, os as _os
+        stack = _os.path.basename(fpath).replace(".yml","").replace(".yaml","")
+        try:
+            r = _sp.run(["python3","/usr/local/lib/stacks_fix.py",stack],
+                capture_output=True, text=True, timeout=60)
+            notes.append(f"fix ran on {stack}" if r.returncode==0 else f"fix error: {r.stderr[:80]}")
+        except Exception as e:
+            notes.append(f"fix error: {e}")
     return notes
 
 def main():
