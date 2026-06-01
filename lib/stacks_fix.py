@@ -2348,15 +2348,21 @@ def post_build_inject(fpath, svc_name, cfg=None):
             for vol in svc.get("named_volumes", []):
                 missing_vols.add(vol)
 
-        # Find creator and add
+        # Find creator and add - filter already defined
+        creators = discover_creator_files(stacks_dir)
+        already = set()
+        for _cp, _cd in creators.items():
+            already |= set(_cd.get("nets", set()))
+        new_nets = missing_nets - already
         creator = find_or_create_creator(stacks_dir, _cfg)
-        if creator and (missing_nets or missing_vols):
-            creators = discover_creator_files(stacks_dir)
+        if creator and new_nets:
             used = all_used_subnets(creators, _cfg.get("FIX_SUBNET_BASE","10.50"))
-            result = add_to_creator(creator, missing_nets, missing_vols,
+            result = add_to_creator(creator, new_nets, missing_vols,
                 _cfg.get("FIX_SUBNET_BASE","10.50"), used, False)
             if result:
-                notes.append(f"added {len(missing_nets)} nets, {len(missing_vols)} vols to {os.path.basename(creator)}")
+                notes.append(f"added {new_nets} to {os.path.basename(creator)}")
+        elif not new_nets:
+            notes.append("all networks already defined in creator files")
 
         # Also add bind mount volume if BUILD_AUTO_VOLUME=1
         if _cfg.get("BUILD_AUTO_VOLUME","0") == "1":
