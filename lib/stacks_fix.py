@@ -266,6 +266,162 @@ def hc_from_pattern(image, ports):
             '30s','10s',5,'60s', "generic")
 
 
+# Creator file generator - to be injected into stacks_fix.py
+
+CREATOR_TEMPLATE = '''\
+name: {name}
+#======================================================================
+# Auto-generated network/volume creator file
+# Managed by stacks stacks fixer - do not edit manually
+#======================================================================
+x-common-caps: &common-caps
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: {{max-size: 10m, max-file: '3'}}
+
+services:
+  {provisioner_name}:
+    <<: *common-caps
+    container_name: {provisioner_name}
+    image: alpine:latest
+    command: >
+      sh -c "
+      {network_cmds}
+      {volume_cmds}
+      echo All networks and volumes created.
+      sleep infinity"
+    networks:
+{service_networks}
+    volumes:
+{service_volumes}
+
+networks:
+{top_networks}
+
+volumes:
+{top_volumes}
+'''
+
+def generate_creator_file(path, name, networks, volumes, subnet_base="10.50", used_subnets=None):
+    """
+    Generate a complete creator compose file with provisioner container.
+    networks: list of network names
+    volumes: list of volume names
+    """
+    if used_subnets is None:
+        used_subnets = set()
+
+    provisioner_name = f"provisioner_{name.replace('-','_')}"
+    
+    # Generate network definitions
+    top_nets = []
+    service_nets = []
+    net_cmds = []
+    
+    for i, net in enumerate(networks):
+        # Find next available subnet octet
+        octet = 1
+        while octet in used_subnets or octet > 254:
+            octet += 1
+        used_subnets.add(octet)
+        
+        base = net.replace('_net','')
+        subnet = f"{subnet_base}.{octet}.0/24"
+        gateway = f"{subnet_base}.{octet}.1"
+        
+        top_nets.append(
+            f"  {net}: {{name: {net}, driver: bridge, attachable: true, "
+            f"external: false, internal: false, enable_ipv6: false, "
+            f'labels: ["com.stacks.network={base}", '
+            f'"com.stacks.env=production"], '
+            f"ipam: {{driver: default, config: [{{subnet: {subnet}, "
+            f"gateway: {gateway}}}]}}}}"
+        )
+        service_nets.append(f"      {net}:")
+        net_cmds.append(f"      docker network create {net} 2>/dev/null || true")
+    
+    # Generate volume definitions
+    top_vols = []
+    service_vols = []
+    vol_cmds = []
+    
+    for vol in volumes:
+        top_vols.append(f"  {vol}: {{name: {vol}, external: true}}")
+        service_vols.append(f"      - /tmp:/tmp")  # dummy mount for provisioner
+        vol_cmds.append(f"      docker volume create {vol} 2>/dev/null || true")
+    
+    if not top_nets:
+        top_nets = ["  {}  # no networks yet"]
+    if not top_vols:
+        top_vols = ["  {}  # no volumes yet"]
+    if not service_nets:
+        service_nets = ["      traefik_net:"]
+    if not service_vols:
+        service_vols = ["      - /tmp:/tmp"]
+
+    content = CREATOR_TEMPLATE.format(
+        name=name,
+        provisioner_name=provisioner_name,
+        network_cmds='\n      '.join(net_cmds) if net_cmds else 'echo no networks',
+        volume_cmds='\n      '.join(vol_cmds) if vol_cmds else 'echo no volumes',
+        service_networks='\n'.join(service_nets),
+        service_volumes='\n'.join(service_vols),
+        top_networks='\n'.join(top_nets),
+        top_volumes='\n'.join(top_vols),
+    )
+    
+    with open(path, 'w') as f:
+        f.write(content)
+    return path
+
+
+def find_or_create_creator(stacks_dir, cfg):
+    """
+    Find existing creator file or create a new one based on config.
+    Returns path to creator file to use.
+    """
+    import os, glob
+    
+    # First try to find existing creator with provisioner
+    best = None
+    best_size = float('inf')
+    for f in sorted(glob.glob(f"{stacks_dir}/*.yml")):
+        try:
+            content = open(f).read()
+            import re
+            if re.search(r'container_name:\s*provisioner', content):
+                sz = os.path.getsize(f)
+                # Check if under max limits
+                net_count = len(re.findall(r'^\s{2}\w+_net:', content, re.MULTILINE))
+                vol_count = len(re.findall(r'^\s{2}\w+:\s*\{.*external', content, re.MULTILINE))
+                max_nets = int(cfg.get('FIX_CREATOR_MAX_NETWORKS', '20'))
+                max_vols = int(cfg.get('FIX_CREATOR_MAX_VOLUMES', '20'))
+                if net_count < max_nets and vol_count < max_vols:
+                    if sz < best_size:
+                        best_size = sz
+                        best = f
+        except: pass
+    
+    if best:
+        return best
+    
+    # No suitable creator found - create one if config allows
+    if cfg.get('FIX_AUTO_CREATE_CREATOR', '0') != '1':
+        return None
+    
+    base_name = cfg.get('FIX_CREATOR_NAME', 'core')
+    # Find next available number
+    n = 0
+    while os.path.exists(os.path.join(stacks_dir, f"{base_name}_{n}.yml")):
+        n += 1
+    
+    new_path = os.path.join(stacks_dir, f"{base_name}_{n}.yml")
+    generate_creator_file(new_path, f"{base_name}_{n}", [], [])
+    return new_path
+
+
+
 # ── Image healthcheck knowledge base ────────────────────────────────────────
 IMAGE_HC_DB = {
     "cloudflare/cloudflared":               (["CMD", "cloudflared", "version"], "30s", "5s", 3, "10s"),
