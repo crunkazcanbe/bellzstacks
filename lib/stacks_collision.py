@@ -55,132 +55,62 @@ def is_port_free_on_host(ip, port):
 # ── Related container grouping ────────────────────────────────────────────────
 def get_related_containers(fpath):
     """
-    Group related containers using multiple detection methods:
-    1. Name prefix  (coolify / coolify-db / coolify-redis)
-    2. Shared private network (coolify_net used by multiple)
-    3. depends_on declarations
-    4. Env vars (DATABASE_URL, REDIS_URL etc pointing to container)
-    5. Same domainname
-    6. URL references in env vars (http://containername:port)
-    Returns list of sets of container names.
+    Group related containers using ONLY two methods:
+    1. Shared private network (e.g. coolify_net shared by coolify+coolify-db+coolify-redis)
+    2. Name prefix match (coolify matches coolify-db, coolify-redis, coolify-realtime)
+    traefik_net is excluded as it is on every container.
+    Returns list of sets of related container names.
     """
     groups = []
     try:
         data = open(fpath).read()
-        cnames = [c.strip('"\'') for c in re.findall(r'container_name:\s*(\S+)', data)]
+        cnames = [c.strip('"'') for c in re.findall(r'container_name:\s*(\S+)', data)]
         if not cnames:
             return []
 
-        # Build container info blocks
-        info = {}
-        for cname in cnames:
-            idx = data.find('container_name: ' + cname)
-            if idx < 0:
-                idx = data.find(f'container_name: "{cname}"')
-            if idx < 0:
-                continue
-            block = data[idx:idx+3000]
-            info[cname] = block
-
         def find_g(name):
             for g in groups:
-                if name in g:
-                    return g
+                if name in g: return g
             return None
 
         def merge(a, b):
+            if a == b: return
             ga, gb = find_g(a), find_g(b)
             if ga is None and gb is None:
-                ng = {a, b}; groups.append(ng)
-            elif ga is None:
-                gb.add(a)
-            elif gb is None:
-                ga.add(b)
+                groups.append({a, b})
+            elif ga is None: gb.add(a)
+            elif gb is None: ga.add(b)
             elif ga is not gb:
                 ga.update(gb); groups.remove(gb)
 
-        # Method 1: Name prefix matching
-        # Group containers sharing a common prefix (min 3 chars)
-        for i, c1 in enumerate(cnames):
-            for c2 in cnames[i+1:]:
-                # Find common prefix
-                prefix = ''
-                for ch1, ch2 in zip(c1, c2):
-                    if ch1 == ch2:
-                        prefix += ch1
-                    else:
-                        break
-                # Strip trailing separators
-                prefix = prefix.rstrip('-_')
-                if len(prefix) >= 4 and (
-                    len(prefix) >= len(c1) * 0.6 or
-                    len(prefix) >= len(c2) * 0.6
-                ):
-                    merge(c1, c2)
-
-        # Method 2: Shared private network
+        # Method 1: Shared private network only
         net_members = {}
-        for cname, block in info.items():
+        for cname in cnames:
+            idx = data.find('container_name: ' + cname)
+            if idx < 0: continue
+            block = data[idx:idx+3000]
             nets = re.findall(r'(\w+_net)\s*:', block)
             for net in nets:
-                if net in ('traefik_net', 'apartment_net', 'bridge', 'host', 'none', 'ingress'):
+                # Skip global networks
+                if net in ('traefik_net','apartment_net','bridge','host','none','ingress'):
                     continue
                 if net not in net_members:
                     net_members[net] = []
-                net_members[net].append(cname)
+                if cname not in net_members[net]:
+                    net_members[net].append(cname)
         for net, members in net_members.items():
             if len(members) > 1:
                 for m in members[1:]:
                     merge(members[0], m)
 
-        # Method 3: depends_on
-        for cname, block in info.items():
-            # depends_on as list
-            for dep in re.findall(r'depends_on.*?-\s+["\']?(\w[\w-]+)["\']?', block):
-                dep = dep.strip('"\'')
-                if dep in cnames:
-                    merge(cname, dep)
-            # depends_on as dict
-            for dep in re.findall(r'depends_on.*?(\w[\w-]+)\s*:\s*\n\s+condition', block):
-                dep = dep.strip('"\'')
-                if dep in cnames:
-                    merge(cname, dep)
-
-        # Method 4: Env var references
-        env_keys = (
-            'DB_HOST', 'DATABASE_HOST', 'POSTGRES_HOST', 'MYSQL_HOST',
-            'MONGO_HOST', 'REDIS_HOST', 'REDIS_URL', 'DATABASE_URL',
-            'MONGO_URL', 'ELASTICSEARCH_HOST', 'OPENSEARCH_HOST',
-        )
-        for cname, block in info.items():
-            for key in env_keys:
-                for val in re.findall(rf'{key}=(?:https?://)?["\']?([a-zA-Z][a-zA-Z0-9_-]+)', block):
-                    val = val.strip('"\'')
-                    if val in cnames:
-                        merge(cname, val)
-
-        # Method 5: URL references http://containername:port
-        for cname, block in info.items():
-            for ref in re.findall(r'https?://([a-zA-Z][a-zA-Z0-9_-]+):\d+', block):
-                ref = ref.strip('"\'')
-                if ref in cnames and ref != cname:
-                    merge(cname, ref)
-
-        # Method 6: Same domainname
-        domains = {}
-        for cname, block in info.items():
-            m = re.search(r'domainname:\s*["\']?([^\s"\']+)', block)
-            if m:
-                d = m.group(1).strip('"\'')
-                if d not in domains:
-                    domains[d] = []
-                domains[d].append(cname)
-        for d, members in domains.items():
-            # Skip generic hostnames shared by whole stack
-            if len(members) > 3: continue  # too many = generic domain, skip
-            if len(members) > 1:
-                for m in members[1:]:
-                    merge(members[0], m)
+        # Method 2: Name prefix
+        # Only merge if one name is a prefix of the other (with separator)
+        for i, c1 in enumerate(cnames):
+            for c2 in cnames[i+1:]:
+                short, long = (c1, c2) if len(c1) <= len(c2) else (c2, c1)
+                # Check if short is a prefix of long with separator
+                if long.startswith(short + '-') or long.startswith(short + '_'):
+                    merge(c1, c2)
 
         return [g for g in groups if len(g) > 1]
     except Exception as e:
