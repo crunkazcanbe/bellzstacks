@@ -367,6 +367,13 @@ def find_or_create_creator(stacks_dir, cfg):
     """
     import os, glob
     
+    # Respect explicit target from build wizard
+    _target = cfg.get("FIX_CREATOR_TARGET")
+    if _target:
+        _tp = os.path.join(stacks_dir, _target + ".yml")
+        if os.path.exists(_tp):
+            return _tp
+    
     # First try to find existing creator with provisioner
     best = None
     best_size = float('inf')
@@ -2301,6 +2308,43 @@ def post_build_inject_volume(fpath, svc_name, cfg=None):
     return notes
 
 
+
+def declare_net_external_in_stack(fpath, net_name):
+    """Declare net_name as external:true in the top-level networks: section of fpath.
+    Used for stack files (not creators) - the net is created by a core provisioner."""
+    import os, re
+    try:
+        lines = open(fpath).read().split("\n")
+    except: return False
+    # Already declared at top level?
+    in_net = False
+    for l in lines:
+        if re.match(r"^networks:\s*$", l): in_net = True; continue
+        if in_net:
+            if l and not l.startswith(" "): in_net = False; continue
+            if re.match(rf"^  {re.escape(net_name)}\s*:", l): return False
+    # Find top-level networks: section
+    entry = "  " + net_name + ": {name: " + net_name + ", external: true}"
+    out = []
+    inserted = False
+    i = 0
+    while i < len(lines):
+        out.append(lines[i])
+        if re.match(r"^networks:\s*$", lines[i]) and not inserted:
+            out.append(entry); inserted = True
+        i += 1
+    if not inserted:
+        # No networks: section - add before services:
+        out = []
+        for l in lines:
+            if re.match(r"^services:\s*$", l) and not inserted:
+                out.append("networks:"); out.append(entry); inserted = True
+            out.append(l)
+    if inserted:
+        open(fpath, "w").write("\n".join(out))
+        return True
+    return False
+
 def post_build_inject(fpath, svc_name, cfg=None):
     """
     Called after build wizard. Runs Phase 1 of stacks fix:
@@ -2360,9 +2404,25 @@ def post_build_inject(fpath, svc_name, cfg=None):
             result = add_to_creator(creator, new_nets, missing_vols,
                 _cfg.get("FIX_SUBNET_BASE","10.50"), used, False)
             if result:
-                notes.append(f"added {new_nets} to {_os2.path.basename(creator)}")
+                notes.append(f"added {new_nets} to {_os.path.basename(creator)}")
         elif not new_nets:
             notes.append("all networks already defined in creator files")
+
+        # Declare each net as external:true in EVERY stack file that references it
+        # (main stack + DB stack), so containers can actually attach to it
+        import glob as _glob
+        _creator_paths = set(creators.keys())
+        for _net in missing_nets:
+            for _sf in _glob.glob(_os.path.join(stacks_dir, "*.yml")):
+                if _sf in _creator_paths:
+                    continue
+                try:
+                    _refs = any(_net in s.get("networks", []) for s in _parse_services_phase1(_sf))
+                except:
+                    _refs = False
+                if _refs:
+                    if declare_net_external_in_stack(_sf, _net):
+                        notes.append(f"declared {_net} external in {_os.path.basename(_sf)}")
 
         # Also add bind mount volume if BUILD_AUTO_VOLUME=1
         if _cfg.get("BUILD_AUTO_VOLUME","0") == "1":
@@ -2385,9 +2445,23 @@ def _parse_services_phase1(fpath):
             if idx < 0: continue
             block = data[idx:idx+3000]
             nets = _re.findall(r"^\s{6}(\w+_net)\s*:", block, _re.MULTILINE)
-            # Named volumes (not bind mounts)
-            vols = [v for v in _re.findall(r"-\s+(\w[\w-]+):/", block)
-                   if not v.startswith("/") and "/" not in v]
+            # Named volumes: ONLY parse inside the service's volumes: block
+            # (prevents matching http:// in healthcheck command strings)
+            vols = []
+            in_vols = False
+            for ln in block.split("\n"):
+                if _re.match(r"^    volumes:\s*$", ln):
+                    in_vols = True
+                    continue
+                if in_vols:
+                    # End of volumes block: any new 4-space key or dedent
+                    if _re.match(r"^    \w", ln) or (ln and not ln.startswith("      ")):
+                        break
+                    m = _re.match(r'^\s+-\s+"?([^":\s]+):', ln)
+                    if m:
+                        v = m.group(1)
+                        if not v.startswith("/") and "/" not in v:
+                            vols.append(v)
             result.append({"name": svc["name"], "networks": nets, "named_volumes": vols})
     except: pass
     return result

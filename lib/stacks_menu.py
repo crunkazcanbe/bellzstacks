@@ -1109,51 +1109,19 @@ def run_build_wizard(stdscr, new_stack=False):
     svc_num = count_services_in_stack(os.path.join(STACKS_DIR, target_stack + ".yml"))
     svc_desc = load_service_desc(svc_name)
 
+    # BARE container - just image, network, volume. Fix adds everything else.
     bl = []
-    bl.append(f"  # ---------------------------------------------------------")
-    bl.append(f"  # {svc_num}. {container_name.upper()} 🐳")
-    for desc_line in svc_desc.split("\n"):
-        if desc_line.strip(): bl.append(f"  {desc_line}" if not desc_line.startswith("  ") else desc_line)
-    bl.append(f"  # ---------------------------------------------------------")
     bl.append(f"  {svc_name}:")
-    if cfg.get("use_common_caps",True): bl.append("    <<: *common-caps")
     bl.append(f"    image: {image}")
     bl.append(f"    container_name: {container_name}")
-    bl.append(f"    hostname: {container_name}")
-    bl.append(f"    domainname: {container_name}.{domain}")
-    bl.append(f'    cpuset: "{cpuset}"')
-    bl.append(f"    cpu_shares: {cpu_shares}")
-    bl.append(f"    stop_grace_period: {stop_grace}")
-    bl.append(f"    stop_signal: {stop_signal}")
-    bl.append(f"    restart: {restart_pol}")
-    if do_blkio: bl.append(f"    blkio_config: {{weight: 500, device_read_bps: [{{path: /dev/nvme0n1, rate: {blkio_read}}}], device_write_bps: [{{path: /dev/nvme0n1, rate: {blkio_write}}}]}}")
-    if do_ulimits: bl.append("    ulimits: {memlock: {soft: -1, hard: -1}, nofile: {soft: 65535, hard: 65535}, nproc: 65535}")
-    if do_deploy: bl.append(f"    deploy: {{placement: {{constraints: [node.labels.priority == high]}}, resources: {{limits: {{memory: {mem_limit}, cpus: '{cpu_limit}', pids: {pids_limit}}}, reservations: {{memory: {mem_res}, cpus: '0.05'}}}}}}")
-    bl.append(f"    storage_opt: {{size: {storage_size}}}")
-    if do_logging:
-        bl.append("    logging:")
-        bl.append(f"      driver: {log_driver}")
-        bl.append(f"      options: {{max-size: {log_max_size}, max-file: '{log_max_file}'}}")
-    bl.append("    dns:")
-    for d in dns_list: bl.append(f"      - {d}")
-    if extra_env:
-        bl.append("    environment:")
-        for e in extra_env: bl.append(f"      - {e}")
-    if extra_vols:
-        bl.append("    volumes:")
-        for v in extra_vols: bl.append(f"      - {v}")
     bl.append("    networks:")
     bl.append(f"      {net_name}:")
-    bl.append(f"        ipv4_address: {svc_ip}")
+    if svc_ip:
+        bl.append(f"        ipv4_address: {svc_ip}")
     bl.append("      traefik_net:")
     bl.append("        priority: 1000")
-    bl.append("    labels:")
-    bl.append('      - "traefik.enable=true"')
-    bl.append(f'      - "traefik.http.routers.{svc_name}.rule=Host(`{svc_name}.{domain}`)"')
-    bl.append(f'      - "traefik.http.services.{svc_name}.loadbalancer.server.port={svc_port}"')
-    if sab_enable: bl.append('      - "sablier.enable=true"')
-    bl.append(f'      - "sablier.group={sab_group}"')
-    for el in extra_labels: bl.append(f'      - "{el}"')
+    bl.append("    volumes:")
+    bl.append(f"      - /srv/stacks/docker/{svc_name}/config:/config")
 
     # ── Add DB companion service if selected ──────────────────
     fpath = os.path.join(STACKS_DIR, target_stack + ".yml")
