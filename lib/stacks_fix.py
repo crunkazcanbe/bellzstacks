@@ -99,7 +99,6 @@ def load_conf():
                 k = k.strip()
                 v = v.split("#")[0].strip().strip('"').strip("'")
                 cfg[k] = v  # accept all keys, not just pre-defined ones
-                    cfg[k] = v
         except Exception as e:
             pr(f"{Y}⚠ Could not fully read config ({e}); using defaults.{X}")
     return cfg
