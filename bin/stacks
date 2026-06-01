@@ -1783,6 +1783,82 @@ repair_stack_if_needed() {
   [ "$DO_REPAIR" -ne 1 ] && return 0
   local file="$STACKS_DIR/$stack.yml"
   [ ! -f "$file" ] && return 0
+
+  # ── IP/Port collision pre-check ──────────────────────────────────────────
+  # Run collision scan before repair and fix any duplicate IP:PORT assignments
+  update_ui "🔍 Scanning IP/port collisions in $stack..." "$CURRENT_PERCENT"
+  python3 -c "
+import sys, re
+sys.path.insert(0, '/usr/local/lib')
+try:
+    from stacks_collision import (
+        get_collisions, find_ip_with_free_port,
+        is_locked_container, get_related_containers,
+        get_image_default_port, scan_all_ports
+    )
+    import glob, os
+    fpath = '$file'
+    ip_col, port_col = get_collisions()
+    if not port_col:
+        sys.exit(0)
+    # Get containers in this stack
+    data = open(fpath).read()
+    cnames = [c.strip() for c in re.findall(r'container_name:\s*(\S+)', data)]
+    # Get related groups so we keep them on same IP
+    groups = get_related_containers(fpath)
+    def get_group_ip(cname):
+        for g in groups:
+            if cname in g:
+                # Find existing IP for any member of the group
+                port_map = scan_all_ports()
+                for key in port_map:
+                    ip, port = key.split(':', 1)
+                    for stack, owner in port_map[key]:
+                        if owner in g and owner != cname:
+                            return ip
+        return None
+    fixed = 0
+    for col in port_col:
+        if col['type'] != 'duplicate': continue
+        ip, port = col['ip'], col['port']
+        owners = col['owners']
+        # Fix all but first owner
+        for i, (stk, cname) in enumerate(owners):
+            if i == 0: continue  # keep first owner
+            if cname not in cnames: continue  # not in this stack
+            if is_locked_container(cname): continue
+            # Check if group has an existing IP to use
+            group_ip = get_group_ip(cname)
+            if group_ip:
+                new_ip, new_port = group_ip, find_ip_with_free_port(port)[1] or port
+                if not new_port:
+                    continue
+            else:
+                new_ip, new_port = find_ip_with_free_port(port)
+                if not new_ip:
+                    # Try image default port
+                    img_m = re.search(r'container_name:\s*' + re.escape(cname) + r'.*?image:\s*(\S+)', data, re.DOTALL)
+                    if img_m:
+                        ports = get_image_default_port(img_m.group(1))
+                        for p in ports:
+                            new_ip, new_port = find_ip_with_free_port(p)
+                            if new_ip: break
+                if not new_ip: continue
+            # Apply fix to YAML
+            content = open(fpath).read()
+            old_pat = f'{ip}:{port}'
+            new_pat = f'{new_ip}:{new_port}'
+            if old_pat in content:
+                content = content.replace(old_pat, new_pat, 1)
+                open(fpath, 'w').write(content)
+                print(f'FIXED: {cname} {old_pat} -> {new_pat}')
+                fixed += 1
+    if fixed:
+        print(f'Collision fix: {fixed} IP:PORT assignments updated in $stack')
+except Exception as e:
+    print(f'Collision check error: {e}', file=sys.stderr)
+" 2>/dev/null || true
+
   local file_svcs
   file_svcs=$(awk '/^services:/{flag=1; next} /^[a-z]/{flag=0} flag && /^  [a-zA-Z0-9_.+-]+:/{gsub(/[: ]/, ""); print}' "$file" 2>/dev/null)
   for svc in $file_svcs; do
