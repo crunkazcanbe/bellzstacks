@@ -2185,8 +2185,10 @@ def main(stdscr):
             sel = 0; scroll = 0
             continue  # don't process tab-specific keys on same keypress
 
-        # Tab-specific keys
-        if tab == 0:  # Containers
+        # Tab-specific keys - only process if not a tab-switch key
+        if k in (curses.KEY_RIGHT, curses.KEY_LEFT):
+            pass
+        elif tab == 0:  # Containers
             items = containers
             vis = h - 7
             if k == curses.KEY_UP:
