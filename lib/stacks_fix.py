@@ -1553,46 +1553,42 @@ def is_dep_service(name):
 
 def get_all_groups_global(all_files):
     """
-    Scan ALL compose files and build a global group map.
-    Returns {prefix: {net_name: str, members_by_file: {filename: [svc_names]}}}
+    Build global group map using stacks_families algorithm.
+    Returns {head: {net_name: str, members_by_file: {filename: [svc_names]}}}
     """
-    import os as _os
-    all_services_by_file = {}
+    import glob as _gl2
+    try:
+        from stacks_families import get_families
+        families = get_families()
+    except Exception:
+        families = {}
+
+    # Build container->file index
+    import re as _re
+    cname_to_file = {}
     for f in all_files:
         try:
-            svcs, _rlines = parse_services_with_positions(f)
-            _ = [l.rstrip('\n') for l in _rlines]
-            real = [s['name'] for s in svcs
-                   if not s['name'].startswith('provisioner')
-                   and s.get('image','')
-                   and not re.match(r'^alpine(:|$)', s.get('image',''))]
-            all_services_by_file[f] = real
-        except:
-            all_services_by_file[f] = []
+            data = open(f).read()
+            for c in _re.findall(r'container_name:\s*(\S+)', data):
+                cname_to_file[c.strip().strip('"\'\'')] = f
+        except: pass
 
-    # Build global prefix groups
-    prefix_to_files = {}  # prefix -> {file -> [svc_names]}
-    for f, svcs in all_services_by_file.items():
-        for svc in svcs:
-            prefix = svc.replace('_','-').split('-')[0]
-            if prefix not in prefix_to_files:
-                prefix_to_files[prefix] = {}
-            if f not in prefix_to_files[prefix]:
-                prefix_to_files[prefix][f] = []
-            prefix_to_files[prefix][f].append(svc)
-
-    # Build result - only groups with 2+ members globally
     result = {}
-    for prefix, files_map in prefix_to_files.items():
-        all_members = [s for svcs in files_map.values() for s in svcs]
-        if len(all_members) < 2:
-            continue
-        net_name = f"{prefix}_net"
-        result[prefix] = {
-            'net_name': net_name,
-            'members_by_file': files_map,
-            'all_members': all_members,
-        }
+    for head, members in families.items():
+        net_name = f"{head.replace('.', '-').replace('_', '-')}_net"
+        members_by_file = {}
+        for m in members:
+            f = cname_to_file.get(m)
+            if f:
+                if f not in members_by_file:
+                    members_by_file[f] = []
+                members_by_file[f].append(m)
+        if members_by_file:
+            result[head] = {
+                'net_name': net_name,
+                'members_by_file': members_by_file,
+                'all_members': list(members),
+            }
     return result
 
 def get_service_groups(services):
