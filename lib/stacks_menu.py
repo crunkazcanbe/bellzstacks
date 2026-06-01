@@ -1683,6 +1683,7 @@ Mounts: {{len .Mounts}} volumes''',
 
 def do_container_action(stdscr, container_name, stack_file, action):
 
+    curses.flushinp()
     if action is None: return
     stack_name = os.path.basename(stack_file).replace('.yml','') if stack_file else ''
     if action == 'start':
@@ -2274,6 +2275,7 @@ def main(stdscr):
                 result = run_popup_action(stdscr,
                     f'Container: {cname[:20]}', CONTAINER_ACTIONS)
                 if result and result[1]:
+                    curses.flushinp()
                     do_container_action(stdscr, cname, stack_file, result[1])
 
         elif tab == 1:  # Stacks
