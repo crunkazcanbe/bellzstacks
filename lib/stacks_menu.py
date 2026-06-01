@@ -181,46 +181,50 @@ def register_tab(name):
     return TABS.index(name)
 
 def draw_tabs(win, y, w, tabs, active):
-    """Draw tab bar. Scrolls to keep active tab visible if too many tabs."""
-    try: win.addstr(y, 0, ' ' * w, curses.color_pair(C_DIM))
+    """Draw scrolling tab bar - always shows active tab."""
+    try: win.addstr(y, 0, ' ' * (w-1), curses.color_pair(C_DIM))
     except: pass
-    # Calculate visible window around active tab
-    total_w = sum(len(f'  {t}  ') + 1 for t in tabs)
-    if total_w <= w:
-        # All tabs fit
-        x = 2
-        for i, tab in enumerate(tabs):
-            label = f'  {tab}  '
-            if x + len(label) > w - 2: break
+    # Build all labels
+    labels = [f' {t} ' for t in tabs]
+    widths = [len(l)+1 for l in labels]
+    total = sum(widths)
+    if total <= w - 2:
+        # All fit
+        x = 1
+        for i, label in enumerate(labels):
             try:
-                if i == active:
-                    win.addstr(y, x, label, curses.color_pair(C_SELECTED))
-                else:
-                    win.addstr(y, x, label, curses.color_pair(C_DIM))
+                attr = curses.color_pair(C_SELECTED) if i == active else curses.color_pair(C_DIM)
+                win.addstr(y, x, label, attr)
             except: pass
-            x += len(label) + 1
+            x += widths[i]
     else:
-        # Scroll: show tabs around active
-        # Find start tab to show active
-        start = max(0, active - 3)
-        x = 2
-        if start > 0:
+        # Scroll: center active tab
+        # Find x offset so active tab is visible
+        x_positions = []
+        x = 1
+        for w2 in widths:
+            x_positions.append(x)
+            x += w2
+        # Scroll offset: try to center active
+        active_x = x_positions[active]
+        offset = max(0, active_x - w//2)
+        # Draw with offset
+        x = 1
+        if offset > 0:
             try: win.addstr(y, x, '◀', curses.color_pair(C_DIM))
             except: pass
             x += 2
-        for i in range(start, len(tabs)):
-            label = f' {tabs[i]} '
-            if x + len(label) + 3 > w - 2:
-                try: win.addstr(y, x, '▶', curses.color_pair(C_DIM))
+        for i, label in enumerate(labels):
+            draw_x = x_positions[i] - offset + (2 if offset > 0 else 0)
+            if draw_x < 1: continue
+            if draw_x + len(label) > w - 2:
+                try: win.addstr(y, w-3, '▶', curses.color_pair(C_DIM))
                 except: pass
                 break
             try:
-                if i == active:
-                    win.addstr(y, x, label, curses.color_pair(C_SELECTED))
-                else:
-                    win.addstr(y, x, label, curses.color_pair(C_DIM))
+                attr = curses.color_pair(C_SELECTED) if i == active else curses.color_pair(C_DIM)
+                win.addstr(y, draw_x, label, attr)
             except: pass
-            x += len(label) + 1
 
 def draw_footer(win, h, w, hints):
     msg = '  '.join(hints)
@@ -2178,7 +2182,6 @@ def main(stdscr):
         if k in (ord('q'), ord('Q')): break
         if k == curses.KEY_RIGHT:
             tab = (tab + 1) % len(TABS)
-            open("/tmp/t.txt","a").write(f"RIGHT tab={tab}\n")
             sel = 0; scroll = 0
         elif k == curses.KEY_LEFT:
             tab = (tab - 1) % len(TABS)
