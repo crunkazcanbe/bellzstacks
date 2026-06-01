@@ -2191,6 +2191,100 @@ def inject_cpuset(lines, svc, gi, stack_prefix, dry_run=False):
     return new_lines, changes
 
 
+
+# ── Post-build auto-inject ────────────────────────────────────────────────────
+def post_build_inject_network(fpath, svc_name, cfg=None):
+    """
+    Called after build wizard. Auto-injects:
+    1. mastername_net for the new container
+    2. traefik_net
+    3. Declares network in creator file
+    Uses stacks_families to determine the family network name.
+    """
+    if cfg is None: cfg = load_conf()
+    if cfg.get("BUILD_AUTO_NETWORK","1") != "1": return []
+    notes = []
+    try:
+        from stacks_families import get_family_of
+        import re as _re
+        data = open(fpath).read()
+        lines = [l.rstrip("\n") for l in open(fpath).readlines()]
+        svcs, raw = parse_services_with_positions(fpath)
+        svc = next((s for s in svcs if s["name"] == svc_name), None)
+        if not svc: return []
+
+        # Determine network name from family
+        head, members = get_family_of(svc_name)
+        if head:
+            root = head.replace(".","_").replace("-","_").split("_")[0]
+            net_name = f"{root}_net"
+        else:
+            root = svc_name.replace(".","_").replace("-","_").split("_")[0]
+            net_name = f"{root}_net"
+
+        # Inject mastername_net
+        lines, changed = inject_network_into_service(lines, svc, net_name, 500, False)
+        if changed:
+            notes.append(f"added {net_name}")
+        # Inject traefik_net
+        lines, changed = inject_network_into_service(lines, svc, "traefik_net", 1000, False)
+        if changed:
+            notes.append("added traefik_net")
+
+        # Declare network in creator file
+        stacks_dir = os.path.dirname(fpath)
+        ensure_network_in_creator_file(net_name, stacks_dir,
+            cfg.get("FIX_SUBNET_BASE","10.50"))
+        lines, _ = ensure_network_declared(lines, net_name)
+
+        if notes:
+            open(fpath, "w").write("\n".join(lines) + "\n")
+    except Exception as e:
+        notes.append(f"network inject error: {e}")
+    return notes
+
+
+def post_build_inject_volume(fpath, svc_name, cfg=None):
+    """
+    Called after build wizard. Auto-creates bind mount volume
+    for the new container if it has no volumes defined.
+    """
+    if cfg is None: cfg = load_conf()
+    if cfg.get("BUILD_AUTO_VOLUME","1") != "1": return []
+    notes = []
+    try:
+        import re as _re
+        data = open(fpath).read()
+        idx = data.find(f"container_name: {svc_name}")
+        if idx < 0: return []
+        block = data[idx:idx+3000]
+        nxt = _re.search(r"\n  [a-zA-Z]", block[10:])
+        if nxt: block = block[:nxt.start()+10]
+        # Skip if already has volumes
+        if "volumes:" in block: return []
+        vol_base = cfg.get("FIX_VOLUME_BASE","/srv/stacks/docker")
+        vol_path = f"{vol_base}/{svc_name}/config"
+        os.makedirs(vol_path, exist_ok=True)
+        # Find insertion point after image: line
+        lines = open(fpath).readlines()
+        cname_line = next((i for i,l in enumerate(lines)
+                          if f"container_name: {svc_name}" in l), None)
+        if cname_line is None: return []
+        insert_at = cname_line
+        for j in range(cname_line, min(cname_line+15, len(lines))):
+            if _re.match(r"    image:", lines[j]):
+                insert_at = j; break
+        vol_lines = [
+            "    volumes:\n",
+            f"      - {vol_path}:/config\n",
+        ]
+        lines[insert_at+1:insert_at+1] = vol_lines
+        open(fpath, "w").writelines(lines)
+        notes.append(f"added volume {vol_path}:/config")
+    except Exception as e:
+        notes.append(f"volume inject error: {e}")
+    return notes
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     dry_run = '--dry-run' in sys.argv[1:]

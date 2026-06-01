@@ -1179,6 +1179,17 @@ def run_build_wizard(stdscr, new_stack=False):
         else:
             run_log_popup(stdscr, f"Start {container_name}", f"docker compose -f {fpath} up -d {svc_name}")
 
+    # Auto-inject network and volume after build
+    try:
+        import sys as _sys2
+        _sys2.path.insert(0, '/usr/local/lib')
+        from stacks_fix import post_build_inject_network, post_build_inject_volume, load_conf as _lc
+        _cfg = _lc()
+        _net_notes = post_build_inject_network(fpath, svc_name, _cfg)
+        _vol_notes = post_build_inject_volume(fpath, svc_name, _cfg)
+    except Exception as _pbe:
+        pass  # non-fatal, don't block build completion
+
     # Done - clear everything first
     stdscr.clear(); stdscr.refresh()
     pct[0] = 100
