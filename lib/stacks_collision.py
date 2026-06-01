@@ -123,7 +123,7 @@ def get_related_containers(fpath):
         for cname, block in info.items():
             nets = re.findall(r'(\w+_net)\s*:', block)
             for net in nets:
-                if net in ('traefik_net', 'apartment_net'):
+                if net in ('traefik_net', 'apartment_net', 'bridge', 'host', 'none', 'ingress'):
                     continue
                 if net not in net_members:
                     net_members[net] = []
@@ -176,6 +176,8 @@ def get_related_containers(fpath):
                     domains[d] = []
                 domains[d].append(cname)
         for d, members in domains.items():
+            # Skip generic hostnames shared by whole stack
+            if len(members) > 3: continue  # too many = generic domain, skip
             if len(members) > 1:
                 for m in members[1:]:
                     merge(members[0], m)
