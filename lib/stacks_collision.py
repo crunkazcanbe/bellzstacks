@@ -55,52 +55,130 @@ def is_port_free_on_host(ip, port):
 # ── Related container grouping ────────────────────────────────────────────────
 def get_related_containers(fpath):
     """
-    Parse compose file and group containers that reference each other.
-    Returns list of sets, each set = related container names that should share an IP.
-    Uses depends_on and common env vars (DB_HOST, REDIS_HOST etc).
+    Group related containers using multiple detection methods:
+    1. Name prefix  (coolify / coolify-db / coolify-redis)
+    2. Shared private network (coolify_net used by multiple)
+    3. depends_on declarations
+    4. Env vars (DATABASE_URL, REDIS_URL etc pointing to container)
+    5. Same domainname
+    6. URL references in env vars (http://containername:port)
+    Returns list of sets of container names.
     """
     groups = []
     try:
         data = open(fpath).read()
-        # Get all container names
-        cnames = re.findall(r'container_name:\s*(\S+)', data)
-        # Get depends_on relationships
-        deps = {}
-        for cname in cnames:
-            # Find the block for this container
-            idx = data.find('container_name: ' + cname)
-            if idx < 0: continue
-            block = data[idx:idx+2000]
-            my_deps = set()
-            # depends_on entries
-            for dep in re.findall(r'depends_on[^:]*:[^\n]*\n((?:\s+-\s+\S+\n)+)', block):
-                for d in re.findall(r'-\s+(\S+)', dep):
-                    my_deps.add(d.strip('"\''))
-            # env var references to other containers
-            for ref in re.findall(r'(?:DB_HOST|REDIS_HOST|DATABASE_HOST|POSTGRES_HOST|MYSQL_HOST|MONGO_HOST|REDIS_URL|DATABASE_URL)=(?:https?://)?([\w.-]+)', block):
-                if ref in cnames:
-                    my_deps.add(ref.strip('"\''))
-            if my_deps:
-                deps[cname] = my_deps
+        cnames = [c.strip('"\'') for c in re.findall(r'container_name:\s*(\S+)', data)]
+        if not cnames:
+            return []
 
-        # Union-find grouping
+        # Build container info blocks
+        info = {}
+        for cname in cnames:
+            idx = data.find('container_name: ' + cname)
+            if idx < 0:
+                idx = data.find(f'container_name: "{cname}"')
+            if idx < 0:
+                continue
+            block = data[idx:idx+3000]
+            info[cname] = block
+
         def find_g(name):
             for g in groups:
-                if name in g: return g
+                if name in g:
+                    return g
             return None
 
-        for cname, cdeps in deps.items():
-            g = find_g(cname)
-            if not g:
-                g = {cname}
-                groups.append(g)
-            for dep in cdeps:
-                dg = find_g(dep)
-                if dg and dg is not g:
-                    g.update(dg)
-                    groups.remove(dg)
-                else:
-                    g.add(dep)
+        def merge(a, b):
+            ga, gb = find_g(a), find_g(b)
+            if ga is None and gb is None:
+                ng = {a, b}; groups.append(ng)
+            elif ga is None:
+                gb.add(a)
+            elif gb is None:
+                ga.add(b)
+            elif ga is not gb:
+                ga.update(gb); groups.remove(gb)
+
+        # Method 1: Name prefix matching
+        # Group containers sharing a common prefix (min 3 chars)
+        for i, c1 in enumerate(cnames):
+            for c2 in cnames[i+1:]:
+                # Find common prefix
+                prefix = ''
+                for ch1, ch2 in zip(c1, c2):
+                    if ch1 == ch2:
+                        prefix += ch1
+                    else:
+                        break
+                # Strip trailing separators
+                prefix = prefix.rstrip('-_')
+                if len(prefix) >= 4 and (
+                    len(prefix) >= len(c1) * 0.6 or
+                    len(prefix) >= len(c2) * 0.6
+                ):
+                    merge(c1, c2)
+
+        # Method 2: Shared private network
+        net_members = {}
+        for cname, block in info.items():
+            nets = re.findall(r'(\w+_net)\s*:', block)
+            for net in nets:
+                if net in ('traefik_net', 'apartment_net'):
+                    continue
+                if net not in net_members:
+                    net_members[net] = []
+                net_members[net].append(cname)
+        for net, members in net_members.items():
+            if len(members) > 1:
+                for m in members[1:]:
+                    merge(members[0], m)
+
+        # Method 3: depends_on
+        for cname, block in info.items():
+            # depends_on as list
+            for dep in re.findall(r'depends_on.*?-\s+["\']?(\w[\w-]+)["\']?', block):
+                dep = dep.strip('"\'')
+                if dep in cnames:
+                    merge(cname, dep)
+            # depends_on as dict
+            for dep in re.findall(r'depends_on.*?(\w[\w-]+)\s*:\s*\n\s+condition', block):
+                dep = dep.strip('"\'')
+                if dep in cnames:
+                    merge(cname, dep)
+
+        # Method 4: Env var references
+        env_keys = (
+            'DB_HOST', 'DATABASE_HOST', 'POSTGRES_HOST', 'MYSQL_HOST',
+            'MONGO_HOST', 'REDIS_HOST', 'REDIS_URL', 'DATABASE_URL',
+            'MONGO_URL', 'ELASTICSEARCH_HOST', 'OPENSEARCH_HOST',
+        )
+        for cname, block in info.items():
+            for key in env_keys:
+                for val in re.findall(rf'{key}=(?:https?://)?["\']?([a-zA-Z][a-zA-Z0-9_-]+)', block):
+                    val = val.strip('"\'')
+                    if val in cnames:
+                        merge(cname, val)
+
+        # Method 5: URL references http://containername:port
+        for cname, block in info.items():
+            for ref in re.findall(r'https?://([a-zA-Z][a-zA-Z0-9_-]+):\d+', block):
+                ref = ref.strip('"\'')
+                if ref in cnames and ref != cname:
+                    merge(cname, ref)
+
+        # Method 6: Same domainname
+        domains = {}
+        for cname, block in info.items():
+            m = re.search(r'domainname:\s*["\']?([^\s"\']+)', block)
+            if m:
+                d = m.group(1).strip('"\'')
+                if d not in domains:
+                    domains[d] = []
+                domains[d].append(cname)
+        for d, members in domains.items():
+            if len(members) > 1:
+                for m in members[1:]:
+                    merge(members[0], m)
 
         return [g for g in groups if len(g) > 1]
     except Exception as e:
