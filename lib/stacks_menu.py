@@ -987,7 +987,7 @@ def run_build_wizard(stdscr, new_stack=False):
                     _creators = []
                     for _cf in sorted(_gl2.glob(f"{STACKS_DIR}/*.yml")):
                         try:
-                            if "provisioner" in open(_cf).read():
+                            if re.search(r"container_name:\s*provisioner", open(_cf).read()):
                                 _creators.append(os.path.basename(_cf).replace(".yml",""))
                         except: pass
                     _creators.append("\u2795 Create new")
