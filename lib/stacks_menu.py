@@ -1916,6 +1916,123 @@ def draw_configs_tab(win, h, w, sel):
             try: win.addstr(y, 2, f"     {line}", attr)
             except: pass
 
+def draw_network_tab(win, h, w, sel=0):
+    """IP and port collision detection tab."""
+    try:
+        win.addstr(3, 2, "NETWORK — IP & PORT COLLISION DETECTION", curses.color_pair(C_ACCENT))
+        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+    except: pass
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location("stacks_collision", "/usr/local/lib/stacks_collision.py")
+        mod = _ilu.module_from_spec(spec); spec.loader.exec_module(mod)
+        ip_col, port_col = mod.get_collisions()
+        ip_map = mod.scan_all_ips()
+        port_map = mod.scan_all_ports()
+        next_ip = mod.get_next_available_ip()
+
+        # Summary
+        y = 5
+        try: win.addstr(y, 2, f"IPs in use: {len(ip_map)}   IP collisions: {len(ip_col)}   Port collisions: {len(port_col)}", curses.color_pair(C_YELLOW))
+        except: pass
+        try: win.addstr(y+1, 2, f"Next available IP: {next_ip or 'NONE'}", curses.color_pair(C_GREEN if next_ip else C_RED))
+        except: pass
+
+        y = 8
+        if ip_col:
+            try: win.addstr(y, 2, "⚠ IP COLLISIONS:", curses.color_pair(C_RED)); y+=1
+            except: pass
+            for c in ip_col[:8]:
+                owners = ", ".join(f"{s}/{n}" for s,n in c["owners"][:3])
+                try: win.addstr(y, 4, f"{c['type']:12} {c['ip']:18} {owners}"[:w-6], curses.color_pair(C_RED)); y+=1
+                except: pass
+        else:
+            try: win.addstr(y, 2, "✔ No IP collisions", curses.color_pair(C_GREEN)); y+=1
+            except: pass
+
+        y += 1
+        if port_col:
+            try: win.addstr(y, 2, "⚠ PORT COLLISIONS:", curses.color_pair(C_RED)); y+=1
+            except: pass
+            for c in port_col[:8]:
+                owners = ", ".join(f"{s}/{n}" for s,n in c["owners"][:3])
+                try: win.addstr(y, 4, f"{c['type']:12} port {c['port']:8} {owners}"[:w-6], curses.color_pair(C_RED)); y+=1
+                except: pass
+        else:
+            try: win.addstr(y, 2, "✔ No port collisions", curses.color_pair(C_GREEN))
+            except: pass
+
+        # Show all IPs
+        y += 2
+        try: win.addstr(y, 2, "ALL IPs IN USE:", curses.color_pair(C_YELLOW)); y+=1
+        except: pass
+        for ip, owners in sorted(ip_map.items()):
+            if y >= h-2: break
+            owner_str = ", ".join(f"{s}/{n}" for s,n in owners[:2])
+            try: win.addstr(y, 4, f"{ip:<18} {owner_str}"[:w-6], curses.color_pair(C_NORMAL)); y+=1
+            except: pass
+    except Exception as e:
+        try: win.addstr(5, 2, f"Error: {e}", curses.color_pair(C_RED))
+        except: pass
+
+NETWORK_ACTIONS = [
+    ("Scan for collisions",          "net_scan"),
+    ("Show all IPs in use",          "net_ips"),
+    ("Show all ports in use",        "net_ports"),
+    ("Edit IP/port config",          "net_config"),
+]
+
+def draw_updates_tab(win, h, w, sel=0):
+    """Image update tracker tab."""
+    try:
+        win.addstr(3, 2, "IMAGE UPDATES", curses.color_pair(C_ACCENT))
+        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+    except: pass
+    try:
+        cache_file = os.path.expanduser("~/.config/stacks/update_cache.json")
+        if os.path.exists(cache_file):
+            import json as _j
+            cache = _j.load(open(cache_file))
+            updates = [v for v in cache.values() if isinstance(v,dict) and v.get("has_update")]
+            ok      = [v for v in cache.values() if isinstance(v,dict) and not v.get("has_update") and not v.get("error")]
+            errors  = [v for v in cache.values() if isinstance(v,dict) and v.get("error")]
+            try:
+                win.addstr(5, 2, f"⬆ Updates available: {len(updates)}   ✔ Up to date: {len(ok)}   ✘ Errors: {len(errors)}", curses.color_pair(C_YELLOW))
+            except: pass
+            y = 7
+            if updates:
+                try: win.addstr(y, 2, "UPDATES AVAILABLE:", curses.color_pair(C_GREEN)); y+=1
+                except: pass
+                for u in updates:
+                    if y >= h-2: break
+                    img = u.get("image","")[:40]
+                    stks = ", ".join(u.get("stacks",[])[:3])
+                    try: win.addstr(y, 4, f"⬆ {img:<42} {stks}"[:w-6], curses.color_pair(C_GREEN)); y+=1
+                    except: pass
+                y += 1
+            if ok:
+                try: win.addstr(y, 2, "UP TO DATE:", curses.color_pair(C_DIM)); y+=1
+                except: pass
+                for u in ok[:10]:
+                    if y >= h-2: break
+                    img = u.get("image","")[:40]
+                    try: win.addstr(y, 4, f"✔ {img}"[:w-6], curses.color_pair(C_DIM)); y+=1
+                    except: pass
+        else:
+            try: win.addstr(5, 2, "No update cache yet. Press C to check for updates.", curses.color_pair(C_DIM))
+            except: pass
+    except Exception as e:
+        try: win.addstr(5, 2, f"Error: {e}", curses.color_pair(C_RED))
+        except: pass
+
+UPDATES_ACTIONS = [
+    ("Check for updates (all images)",    "upd_check_all"),
+    ("Check for updates (running only)",  "upd_check_running"),
+    ("Force re-check (bypass cache)",     "upd_check_force"),
+    ("Pull all available updates",        "upd_pull_all"),
+    ("View update cache",                 "upd_view_cache"),
+]
+
 # ── Main TUI ─────────────────────────────────────────────────────────────────
 def main(stdscr):
     init_colors()
@@ -1996,6 +2113,10 @@ def main(stdscr):
             draw_build_tab(stdscr, h, w, sel)
         elif tab == 7:
             draw_configs_tab(stdscr, h, w, cfg_sel)
+        elif tab == 8:
+            draw_network_tab(stdscr, h, w)
+        elif tab == 9:
+            draw_updates_tab(stdscr, h, w)
 
         draw_footer(stdscr, h, w, FOOTER_HINTS.get(tab, []))
         stdscr.refresh()
@@ -2206,6 +2327,24 @@ def main(stdscr):
                 elif action == 'repair_all':
                     run_log_popup(stdscr, 'Repair ALL', f'python3 /usr/local/lib/stacks_repair.py {STACKS_DIR}')
 
+        elif tab == 8:  # Network
+            if k in (10, 13, ord("s"), ord("S")):
+                run_log_popup(stdscr, "Scan collisions", "python3 /usr/local/lib/stacks_collision.py")
+                stdscr.clear()
+            elif k in (ord("e"), ord("E")):
+                curses.endwin()
+                os.system(f'{os.environ.get("EDITOR","nano")} {os.path.expanduser("~/.config/stacks/stacks.conf")}' )
+                stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
+        elif tab == 9:  # Updates
+            if k in (ord("c"), ord("C")):
+                run_log_popup(stdscr, "Check updates", "python3 /usr/local/lib/stacks_updates.py")
+                stdscr.clear()
+            elif k in (ord("f"), ord("F")):
+                run_log_popup(stdscr, "Force check updates", "python3 /usr/local/lib/stacks_updates.py --force")
+                stdscr.clear()
+            elif k in (ord("p"), ord("P")):
+                run_log_popup(stdscr, "Pull all updates", "python3 /usr/local/lib/stacks_updates.py --pull")
+                stdscr.clear()
         elif tab == 7:  # Configs
             if k == curses.KEY_UP:
                 cfg_sel = max(0, cfg_sel - 1)
