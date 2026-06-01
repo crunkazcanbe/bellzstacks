@@ -1213,7 +1213,8 @@ def run_build_wizard(stdscr, new_stack=False):
         if state.get("creator_stack") == "new": _cfg["FIX_FORCE_CREATE_CREATOR"] = "1"
         elif state.get("creator_stack"): _cfg["FIX_CREATOR_TARGET"] = state["creator_stack"]
         _notes = post_build_inject(fpath, svc_name, _cfg)
-        pass  # non-fatal, don't block build completion
+    except Exception as _pbe:
+        pass  # non-fatal
 
     # Done - clear everything first
     stdscr.clear(); stdscr.refresh()
