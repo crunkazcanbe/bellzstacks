@@ -55,9 +55,9 @@ def pr(msg): print(msg, flush=True)
 # ── Config loader ────────────────────────────────────────────────────────────
 def load_conf():
     cfg = {
-        "FIX_HEALTHCHECKS": "1",
-        "FIX_DEFINE_NETVOL": "1",
-        "FIX_HEAL_TYPOS": "1",
+        "FIX_HEALTHCHECKS": "0",
+        "FIX_DEFINE_NETVOL": "0",
+        "FIX_HEAL_TYPOS": "0",
         "FIX_DEEP_INSPECT": "1",
         "FIX_SUBNET_BASE": "10.50",
         "FIX_BACKUP": "1",
@@ -66,10 +66,10 @@ def load_conf():
         "FIX_AUTO_BIND_MOUNTS": "0",                     # auto-add bind mount if service has none
         "FIX_AUTO_NAMED_VOLUMES": "0",                   # auto-add named volume if service has none
         "FIX_CONVERT_NAMED_TO_BIND": "0",                # convert named volumes to bind mounts
-        "FIX_CREATE_VOLUME_DIRS": "1",                   # auto-create host directories for bind mounts
+        "FIX_CREATE_VOLUME_DIRS": "0",                   # auto-create host directories for bind mounts
         "FIX_AUTO_NETWORKS": "",                         # space-separated networks to add to every service
         "FIX_AUTO_LINK_NETWORKS": "0",                   # auto-gen stackname_net for stacks with 2+ services
-        "FIX_REMOVE_GAPS": "1",  # set to 0 to disable blank line removal in service blocks
+        "FIX_REMOVE_GAPS": "0",  # set to 0 to disable blank line removal in service blocks
         "FIX_HC_IGNORE_STACKS": "",  # space-separated stack files to skip healthcheck changes
         "FIX_REPLACE_BROKEN_HC": "0",  # set to 1 to replace actively-failing healthchecks
         "FIX_FORCE_HC": "0",           # set to 1 to replace ALL healthchecks
@@ -84,7 +84,7 @@ def load_conf():
         "FIX_INLINE_VOLUMES": "0",     # 1 = add volumes directly in service file (not creator)
         "FIX_AUTO_DEPENDS": "0",       # 1 = auto-inject depends_on for related containers (app->db->redis)
         "FIX_FORCE_DEPENDS": "0",      # 1 = re-inject depends_on even if already exists
-        "FIX_STRIP_PROFILES": "1",  # set to 0 to disable auto-stripping of profiles: blocks
+        "FIX_STRIP_PROFILES": "0",  # set to 0 to disable auto-stripping of profiles: blocks
         "FIX_SKIP_FILES": "net_0-ext.yml",
         "FIX_HC_SKIP": "",
         "STACKS_DIR": STACKS_DIR,
