@@ -1210,18 +1210,24 @@ def run_build_wizard(stdscr, new_stack=False):
             run_log_popup(stdscr, f"Start {container_name}", f"docker compose -f {fpath} up -d {svc_name}")
 
     # Auto-inject network and volume after build
-    try:
-        import sys as _sys2
-        _sys2.path.insert(0, '/usr/local/lib')
-        from stacks_fix import post_build_inject, load_conf as _lc
-        _cfg = _lc()
-        if state.get("auto_network"): _cfg["BUILD_AUTO_NETWORK"] = "1"
-        if state.get("auto_volume"): _cfg["BUILD_AUTO_VOLUME"] = "1"
-        if state.get("external_network") is False: _cfg["FIX_EXTERNAL_NETWORKS"] = "0"
-        if state.get("creator_stack") == "new": _cfg["FIX_FORCE_CREATE_CREATOR"] = "1"
-        elif state.get("creator_stack"): _cfg["FIX_CREATOR_TARGET"] = state["creator_stack"]
-        _notes = post_build_inject(fpath, svc_name, _cfg)
-    except Exception as _pbe:
+    if state.get("auto_network") or state.get("auto_volume"):
+        try:
+            import sys as _sys2
+            _sys2.path.insert(0, '/usr/local/lib')
+            from stacks_fix import post_build_inject, load_conf as _lc
+            _cfg = _lc()
+            # Pass wizard choices directly into cfg
+            _cfg["BUILD_AUTO_NETWORK"] = "1" if state.get("auto_network") else "0"
+            _cfg["BUILD_AUTO_VOLUME"] = "1" if state.get("auto_volume") else "0"
+            if state.get("external_network") is False:
+                _cfg["FIX_EXTERNAL_NETWORKS"] = "0"
+            if state.get("creator_stack") == "new":
+                _cfg["FIX_FORCE_CREATE_CREATOR"] = "1"
+            elif state.get("creator_stack"):
+                _cfg["FIX_CREATOR_TARGET"] = state["creator_stack"]
+            _notes = post_build_inject(fpath, svc_name, _cfg)
+        except Exception as _pbe:
+            pass  # non-fatal
         pass  # non-fatal
 
     # Done - clear everything first
