@@ -2360,7 +2360,7 @@ def post_build_inject(fpath, svc_name, cfg=None):
             result = add_to_creator(creator, new_nets, missing_vols,
                 _cfg.get("FIX_SUBNET_BASE","10.50"), used, False)
             if result:
-                notes.append(f"added {new_nets} to {os.path.basename(creator)}")
+                notes.append(f"added {new_nets} to {_os2.path.basename(creator)}")
         elif not new_nets:
             notes.append("all networks already defined in creator files")
 
