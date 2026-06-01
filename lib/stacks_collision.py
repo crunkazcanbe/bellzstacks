@@ -69,7 +69,7 @@ def get_related_containers(fpath):
     groups = []
     try:
         data = open(fpath).read()
-        cnames = [c.strip('"').strip("'") for c in re.findall(r'container_name:\s*(\S+)', data)]
+        cnames = [c.strip('"').strip("'").strip("'") for c in re.findall(r'container_name:\s*(\S+)', data)]
         if not cnames: return []
 
         # Build info blocks per container
@@ -137,7 +137,7 @@ def get_related_containers(fpath):
                     rf'{key}=(?:https?://|redis://|amqp://|postgresql://|mysql://)?'
                     r'(?:[^@\s]*@)?([a-zA-Z][a-zA-Z0-9_-]+)', block
                 ):
-                    val = val.strip('"'')
+                    val = val.strip('"').strip("'").strip("'")
                     if val in cnames and val != cname:
                         merge(cname, val)
 
@@ -147,7 +147,7 @@ def get_related_containers(fpath):
                 r'(?:https?|redis|postgres|mysql|mongo)://[^@\s]*@?([a-zA-Z][a-zA-Z0-9_-]+):\d+',
                 block
             ):
-                ref = ref.strip('"'')
+                ref = ref.strip('"').strip("'")
                 if ref in cnames and ref != cname:
                     merge(cname, ref)
 
