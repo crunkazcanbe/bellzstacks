@@ -1964,6 +1964,9 @@ def draw_configs_tab(win, h, w, sel):
             try: win.addstr(y, 2, f"     {line}", attr)
             except: pass
 
+# Cache for network tab to avoid slow rescan on every draw
+_net_cache = {"data": None, "ts": 0}
+
 def draw_network_tab(win, h, w, sel=0):
     """IP and port collision detection tab."""
     try:
@@ -1971,13 +1974,25 @@ def draw_network_tab(win, h, w, sel=0):
         win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
     except: pass
     try:
-        import importlib.util as _ilu
-        spec = _ilu.spec_from_file_location("stacks_collision", "/usr/local/lib/stacks_collision.py")
-        mod = _ilu.module_from_spec(spec); spec.loader.exec_module(mod)
-        ip_col, port_col = mod.get_collisions()
-        ip_map = mod.scan_all_ips()
-        port_map = mod.scan_all_ports()
-        next_ip = mod.get_next_available_ip()
+        import importlib.util as _ilu, time as _t
+        # Only rescan every 30 seconds
+        if _net_cache["data"] is None or _t.time() - _net_cache["ts"] > 30:
+            try: win.addstr(3, 42, " scanning... ", curses.color_pair(C_DIM))
+            except: pass
+            win.refresh()
+            spec = _ilu.spec_from_file_location("stacks_collision", "/usr/local/lib/stacks_collision.py")
+            mod = _ilu.module_from_spec(spec); spec.loader.exec_module(mod)
+            _net_cache["data"] = {
+                "ip_col": mod.get_collisions()[0],
+                "port_col": mod.get_collisions()[1],
+                "ip_map": mod.scan_all_ips(),
+                "next_ip": mod.get_next_available_ip(),
+            }
+            _net_cache["ts"] = _t.time()
+        ip_col   = _net_cache["data"]["ip_col"]
+        port_col = _net_cache["data"]["port_col"]
+        ip_map   = _net_cache["data"]["ip_map"]
+        next_ip  = _net_cache["data"]["next_ip"]
 
         # Summary
         y = 5
