@@ -2283,71 +2283,69 @@ def main():
 
     _files = files  # alias for phase 4/5
     # ── Phase 3.6: Group IP alignment ────────────────────────────────────────
-    # Move all family members to same IP as the family head (app container)
+    # Move all family members to same IP as the family head
     if on(cfg.get("FIX_GROUP_SAME_IP", "0")):
         pr(f"\n{C}🔗 Aligning family IPs (all members -> same IP as head){X}")
-        import glob as _gl
+        import glob as _gl2
+        _grp_fixed = 0
+        _grp_skip = 0
         try:
-            from stacks_families import get_families
-            from stacks_collision import scan_all_ports, is_locked_container
-        except Exception as _e:
-            pr(f"  {R}✘ Could not load families/collision lib: {_e}{X}")
-            goto_next = True
-        else:
-            goto_next = False
-        if not goto_next:
-            _all_fams = get_families()
-            _port_map = scan_all_ports()
+            from stacks_families import get_families as _get_fams
+            from stacks_collision import scan_all_ports as _scan_ports, is_locked_container as _is_locked
+            _all_fams = _get_fams()
+            _port_map = _scan_ports()
 
-            def _get_ip_ports(cname):
-                for _fp in _gl.glob(f"{sd}/*.yml"):
+            def _gip(cname):
+                for _fp in _gl2.glob(f"{sd}/*.yml"):
                     _d = open(_fp).read()
                     if f"container_name: {cname}" not in _d: continue
-                    _idx = _d.find(f"container_name: {cname}")
-                    _blk = _d[_idx:_idx+3000]
-                    _nxt = re.search(r"\n  [a-zA-Z]", _blk[10:])
-                    if _nxt: _blk = _blk[:_nxt.start()+10]
-                    _pips = re.findall(r"(192\.168\.1\.\d+):(\d+):\d+", _blk)
-                    if _pips: return _pips[0][0], [p[1] for p in _pips], _fp
-                    _m = re.search(r"ipv4_address:\s*(192\.168\.1\.\d+)", _blk)
-                    if _m: return _m.group(1), [], _fp
+                    _i = _d.find(f"container_name: {cname}")
+                    _b = _d[_i:_i+3000]
+                    _nx = re.search(r"\n  [a-zA-Z]", _b[10:])
+                    if _nx: _b = _b[:_nx.start()+10]
+                    _pp = re.findall(r"(192\.168\.1\.\d+):(\d+):\d+", _b)
+                    if _pp: return _pp[0][0], [p[1] for p in _pp], _fp
+                    _m2 = re.search(r"ipv4_address:\s*(192\.168\.1\.\d+)", _b)
+                    if _m2: return _m2.group(1), [], _fp
                 return None, [], None
 
-            _grp_fixed = 0
             for _head, _members in sorted(_all_fams.items()):
-                _head_ip, _, _ = _get_ip_ports(_head)
-                if not _head_ip: continue
+                _hip, _, _ = _gip(_head)
+                if not _hip: continue
                 for _dep in sorted(_members):
                     if _dep == _head: continue
-                    if is_locked_container(_dep): continue
-                    _dip, _dports, _dfp = _get_ip_ports(_dep)
+                    if _is_locked(_dep): continue
+                    _dip, _dports, _dfp = _gip(_dep)
                     if not _dip or not _dfp: continue
-                    if _dip == _head_ip: continue
-                    # Check port conflicts on head IP
+                    if _dip == _hip: continue
                     _ok = all(
-                        f"{_head_ip}:{p}" not in _port_map or
-                        all(o[1]==_dep for o in _port_map[f"{_head_ip}:{p}"])
+                        f"{_hip}:{p}" not in _port_map or
+                        all(o[1]==_dep for o in _port_map[f"{_hip}:{p}"])
                         for p in _dports
                     )
                     if not _ok:
-                        pr(f"  {Y}SKIP {_dep}: port conflict on {_head_ip}{X}")
-                        continue
+                        pr(f"  {Y}SKIP {_dep}: port conflict on {_hip}{X}")
+                        _grp_skip += 1; continue
                     if dry_run:
-                        pr(f"  {G}[dry] {_dep}: {_dip} -> {_head_ip} [{_head}]{X}")
+                        pr(f"  {G}[dry] {_dep}: {_dip} -> {_hip} [{_head}]{X}")
                     else:
                         _dc = open(_dfp).read()
-                        _didx = _dc.find(f"container_name: {_dep}")
-                        _pre = _dc[:_didx]
-                        _rest = _dc[_didx:_didx+3000]
-                        _nxt = re.search(r"\n  [a-zA-Z]", _rest[10:])
-                        _blen = _nxt.start()+10 if _nxt else 3000
-                        _blk = _rest[:_blen].replace(f"{_dip}:", f"{_head_ip}:")
-                        open(_dfp, "w").write(_pre + _blk + _rest[_blen:])
-                        pr(f"  {G}✔ {_dep}: {_dip} -> {_head_ip} [{_head}]{X}")
+                        _di = _dc.find(f"container_name: {_dep}")
+                        _pre = _dc[:_di]
+                        _rest = _dc[_di:_di+3000]
+                        _nx2 = re.search(r"\n  [a-zA-Z]", _rest[10:])
+                        _bl = _nx2.start()+10 if _nx2 else 3000
+                        _blk = _rest[:_bl].replace(f"{_dip}:", f"{_hip}:")
+                        open(_dfp, "w").write(_pre + _blk + _rest[_bl:])
+                        pr(f"  {G}✔ {_dep}: {_dip} -> {_hip} [{_head}]{X}")
                     _grp_fixed += 1
-            if _grp_fixed == 0:
-                pr(f"  {G}✔ All family IPs already aligned{X}")
-            total += _grp_fixed
+        except Exception as _ge:
+            pr(f"  {R}✘ Group IP error: {_ge}{X}")
+        if _grp_fixed == 0 and _grp_skip == 0:
+            pr(f"  {G}✔ All family IPs already aligned{X}")
+        else:
+            pr(f"  {G}✔ {_grp_fixed} aligned, {_grp_skip} skipped{X}")
+        total += _grp_fixed
 
     # ── Phase 4a: collapse double-spaced files ──────────────────────────────
     for f in _files:
