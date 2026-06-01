@@ -2201,7 +2201,8 @@ def post_build_inject_network(fpath, svc_name, cfg=None):
     Uses stacks_families to determine the family network name.
     """
     if cfg is None: cfg = load_conf()
-    if cfg.get("BUILD_AUTO_NETWORK","1") != "1": return []
+    # Only run if explicitly enabled - default OFF to prevent unwanted network creation
+    if cfg.get("BUILD_AUTO_NETWORK","0") != "1": return []
     notes = []
     try:
         from stacks_families import get_family_of
@@ -2255,7 +2256,7 @@ def post_build_inject_volume(fpath, svc_name, cfg=None):
     for the new container if it has no volumes defined.
     """
     if cfg is None: cfg = load_conf()
-    if cfg.get("BUILD_AUTO_VOLUME","1") != "1": return []
+    if cfg.get("BUILD_AUTO_VOLUME","0") != "1": return []
     notes = []
     try:
         import re as _re
