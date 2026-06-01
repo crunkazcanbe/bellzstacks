@@ -69,7 +69,7 @@ def get_related_containers(fpath):
     groups = []
     try:
         data = open(fpath).read()
-        cnames = [c.strip('"'') for c in re.findall(r'container_name:\s*(\S+)', data)]
+        cnames = [c.strip('"').strip("'") for c in re.findall(r'container_name:\s*(\S+)', data)]
         if not cnames: return []
 
         # Build info blocks per container
