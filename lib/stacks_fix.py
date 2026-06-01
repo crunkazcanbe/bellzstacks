@@ -2297,14 +2297,28 @@ def post_build_inject_volume(fpath, svc_name, cfg=None):
 def post_build_inject(fpath, svc_name, cfg=None):
     """
     Single callable for post-build injection.
-    Call this after adding a new container via build wizard.
-    Handles: network def in creator file, network in service,
-             traefik_net, and bind mount volume if none exists.
+    Runs stacks fix phases on just this stack file so
+    networks, volumes, healthchecks etc all get handled
+    exactly the same way as running stacks fix manually.
     """
     if cfg is None: cfg = load_conf()
     notes = []
+    # First do the network injection (adds to creator file too)
     notes += post_build_inject_network(fpath, svc_name, cfg)
-    notes += post_build_inject_volume(fpath, svc_name, cfg)
+    # Then run fix phases on this stack only
+    import subprocess as _sp, os as _os
+    stack = _os.path.basename(fpath).replace('.yml','').replace('.yaml','')
+    try:
+        r = _sp.run(
+            ['python3', '/usr/local/lib/stacks_fix.py', stack],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode == 0:
+            notes.append(f"fix ran on {stack}")
+        else:
+            notes.append(f"fix error: {r.stderr[:100]}")
+    except Exception as e:
+        notes.append(f"fix error: {e}")
     return notes
 
 def main():
