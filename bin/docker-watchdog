@@ -134,6 +134,16 @@ while true; do
 
     # ── 12H CONTAINERD + DOCKERD RESTART ─────────────────────────────────────
     if [ $((CURRENT_TIME - LAST_DAEMON_RESTART)) -ge 43200 ]; then
+        # Defer if a deploy is in progress (don't nuke a running stacks up).
+        # Lock held by docker-stacks-up; also catch any live `stacks up` process.
+        if [ -f /tmp/docker-stacks-up.lock ] && ! flock -n /tmp/docker-stacks-up.lock true 2>/dev/null; then
+            log "⏸️ 12h restart deferred: docker-stacks-up deploy in progress."
+            sleep 60; continue
+        fi
+        if pgrep -f "/usr/local/bin/stacks up" >/dev/null 2>&1; then
+            log "⏸️ 12h restart deferred: a stacks up deploy is running."
+            sleep 60; continue
+        fi
         log "⏰ 12h daemon restart: safely restarting containerd and dockerd..."
         LAST_DAEMON_RESTART=$CURRENT_TIME
         
@@ -249,9 +259,12 @@ while true; do
                         if [ "$_fail_count" -le 2 ]; then
                             log "⚠️ $c unhealthy (attempt $_fail_count/5) — stacks up $_stack $c recreate..."
                             $STACKS up "$_stack" "$c" recreate >/dev/null 2>&1 || true
-                        else
+                        elif [ "$_fail_count" -le 4 ]; then
                             log "⚠️ $c unhealthy (attempt $_fail_count/5) — stacks up $_stack $c repair recreate..."
                             $STACKS up "$_stack" "$c" repair recreate >/dev/null 2>&1 || true
+                        else
+                            log "🚨 $c unhealthy (attempt $_fail_count/5) — LAST RESORT: stacks up $_stack $c fix repair recreate..."
+                            $STACKS up "$_stack" "$c" fix repair recreate >/dev/null 2>&1 || true
                         fi
                     else
                         log "⚠️ $c unhealthy (attempt $_fail_count/5) — docker restart fallback..."
