@@ -68,7 +68,8 @@ def load_conf():
         "FIX_CONVERT_NAMED_TO_BIND": "0",                # convert named volumes to bind mounts
         "FIX_CREATE_VOLUME_DIRS": "0",                   # auto-create host directories for bind mounts
         "FIX_AUTO_NETWORKS": "",                         # space-separated networks to add to every service
-        "FIX_AUTO_LINK_NETWORKS": "0",                   # auto-gen stackname_net for stacks with 2+ services
+        "FIX_AUTO_LINK_NETWORKS": "0",
+        "FIX_AUTHORITATIVE_NETWORKS": "1",  # 1=wipe+set exact nets (removes junk); 0=additive                   # auto-gen stackname_net for stacks with 2+ services
         "FIX_REMOVE_GAPS": "0",  # set to 0 to disable blank line removal in service blocks
         "FIX_HC_IGNORE_STACKS": "",  # space-separated stack files to skip healthcheck changes
         "FIX_REPLACE_BROKEN_HC": "0",  # set to 1 to replace actively-failing healthchecks
@@ -1677,6 +1678,48 @@ def create_volume_dirs(paths, dry_run=False):
                     created.append(f"failed: {path} ({e})")
     return created
 
+def strip_provisioner_volumes(lines, dry_run=False):
+    """In bind mode, provisioner/creator services only create networks — they need
+    NO volumes. Strip the entire volumes: block from any service whose container_name
+    starts with 'provisioner'. Returns (lines, removed_count)."""
+    import tempfile, os as _os
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.yml', delete=False)
+    tmp.write('\n'.join(lines)); tmp.close()
+    try:
+        services, _ = parse_services_with_positions(tmp.name)
+    except Exception:
+        _os.unlink(tmp.name); return lines, 0
+    _os.unlink(tmp.name)
+
+    # find provisioner services by container_name
+    prov_ranges = []
+    for svc in services:
+        blk = lines[svc['block_start']:svc['block_end']+1]
+        if any(re.match(r'^\s*container_name:\s*provisioner', l) for l in blk):
+            prov_ranges.append((svc['block_start'], svc['block_end']))
+
+    if not prov_ranges:
+        return lines, 0
+
+    out = []
+    removed = 0
+    i = 0
+    n = len(lines)
+    while i < n:
+        # are we at the start of a provisioner's volumes: block?
+        in_prov = any(a <= i <= b for (a,b) in prov_ranges)
+        if in_prov and re.match(r'^    volumes:\s*$', lines[i]):
+            # skip the volumes: header + all its 6-space list entries
+            i += 1
+            while i < n and re.match(r'^      ', lines[i]):
+                removed += 1
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return (out, removed) if removed else (lines, 0)
+
+
 def convert_named_to_bind(lines, vol_base, dry_run=False):
     """
     Convert named volume references to bind mounts.
@@ -1926,6 +1969,50 @@ def get_service_groups(services):
         result[prefix] = {'master': master, 'net_name': net_name, 'members': members}
 
     return result
+
+
+def set_networks_authoritative(lines, svc, fam_net=None, stack_net=None):
+    """AUTHORITATIVE: wipe the service's networks: block and set exactly the
+    correct nets — traefik_net (1000) + optional family net (500). Loners get
+    only traefik_net. fam_net is the family network name (e.g. 'supabase_net')
+    or None for a loner. Returns (lines, changed)."""
+    bs, be = svc['block_start'], svc['block_end']
+    # build the desired block
+    want = ['    networks:', '      traefik_net:', '        priority: 1000']
+    if fam_net and fam_net != 'traefik_net':
+        want += ['      %s:' % fam_net, '        priority: 500']
+    if stack_net and stack_net not in ('traefik_net', fam_net):
+        want += ['      %s:' % stack_net, '        priority: 200']
+    # find existing networks: block within the service
+    out = []
+    i = bs
+    net_lo = net_hi = None
+    j = bs
+    while j <= be and j < len(lines):
+        if re.match(r'^    networks:\s*$', lines[j]):
+            net_lo = j
+            k = j + 1
+            while k <= be and k < len(lines) and re.match(r'^      ', lines[k]):
+                k += 1
+            net_hi = k - 1
+            break
+        j += 1
+    new = list(lines)
+    if net_lo is not None:
+        # already same? skip
+        existing = lines[net_lo:net_hi+1]
+        if existing == want:
+            return lines, False
+        new[net_lo:net_hi+1] = want
+        return new, True
+    else:
+        # no networks block — insert before labels/healthcheck/deploy, else at block end
+        ins = be + 1
+        for k in range(bs, min(be+1, len(lines))):
+            if re.match(r'^    (labels|healthcheck|deploy|volumes):', lines[k]):
+                ins = k; break
+        new[ins:ins] = want
+        return new, True
 
 
 def inject_network_into_service(lines, svc, net_name, priority, dry_run=False):
@@ -3112,48 +3199,31 @@ def main():
                 changed = False
                 lines = list(file_lines)
 
-                # 1. Add auto_nets to every service
-                for net in auto_nets:
-                    for svc in reversed(real_svcs):
-                        lines, did_change = inject_network_into_service(
-                            lines, svc, net, auto_net_pri, dry_run)
-                        if did_change:
-                            if dry_run:
-                                pr(f"  {Y}[dry-run] {svc['name']}: would add {net}{X}")
-                            _net_changes += 1
-                            changed = True
-                    lines, _ = ensure_network_declared(lines, net)
-
-                # 2. Auto-link networks using GLOBAL groups
-                if do_link:
-                    svc_names = {s['name'] for s in real_svcs}
-                    for prefix, grp in global_groups.items():
-                        # Check if any member of this group is in this file
-                        file_members = grp['members_by_file'].get(f, [])
-                        if not file_members:
-                            continue
-                        link_net = grp['net_name']
-                        for svc in reversed(real_svcs):
-                            if svc['name'] in file_members:
-                                lines, did_change = inject_network_into_service(
-                                    lines, svc, link_net, link_pri, dry_run)
-                                if did_change:
-                                    if dry_run:
-                                        pr(f"  {Y}[dry-run] {svc['name']}: would add {link_net}{X}")
-                                    _net_changes += 1
-                                    changed = True
-                        lines, _ = ensure_network_declared(lines, link_net)
-
-                # 3. Compose-wide network
-                if do_compose_net:
-                    compose_net = f"{stack_name}_net".replace('-', '_')
-                    for svc in reversed(real_svcs):
-                        lines, did_change = inject_network_into_service(
-                            lines, svc, compose_net, compose_net_pri, dry_run)
-                        if did_change:
-                            _net_changes += 1
-                            changed = True
-                    lines, _ = ensure_network_declared(lines, compose_net)
+                # AUTHORITATIVE network assignment per service:
+                #   traefik_net(1000) + family_net(500 if in family) + stack_net(200 if enabled)
+                from stacks_families import get_family_of as _gfo
+                _stk = f"{stack_name}_net".replace('-', '_') if do_compose_net else None
+                _used_nets = set(['traefik_net'])
+                for svc in reversed(real_svcs):
+                    _blk = lines[svc['block_start']:svc['block_end']+1]
+                    _cn = svc['name']
+                    for _l in _blk:
+                        _m = re.match(r'\s*container_name:\s*(\S+)', _l)
+                        if _m: _cn = _m.group(1).strip().strip('"').strip("'"); break
+                    _fnet = None
+                    if do_link:
+                        _h, _ = _gfo(_cn)
+                        if _h:
+                            _root = _h.replace('.', '-').replace('_', '-').split('-')[0]
+                            _fnet = f"{_root}_net"
+                    lines, did_change = set_networks_authoritative(lines, svc, _fnet, _stk)
+                    if _fnet: _used_nets.add(_fnet)
+                    if _stk: _used_nets.add(_stk)
+                    if did_change:
+                        _net_changes += 1
+                        changed = True
+                for _n in _used_nets:
+                    lines, _ = ensure_network_declared(lines, _n)
 
                 # Write file if changed
                 if changed and not dry_run:
