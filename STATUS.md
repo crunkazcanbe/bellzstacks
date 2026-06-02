@@ -60,3 +60,21 @@ service or stack. MUST preserve anything Josie added since the snapshot.
 - NEVER strip user additions. Diff-and-patch the broken region, not wholesale replace.
 
 
+
+## SESSION 2026-06-02 (evening) — repair_loop BUILT
+- repair_loop(path): error-driven surgical repair. Runs compose config, reads ONE error,
+  classifies (mixed-form/dup/undefined-net/undefined-depends/cycle/indent), fixes that piece
+  in place, re-validates, loops (max 25), stops if stuck. Backs up .prerepair each write.
+  NEVER reverts whole file, NEVER deletes user additions. TESTED: fixed 3 error types in 3 passes.
+- fix_network_form pass: list/mixed networks -> mapping form (traefik 1000, others 500) + dedupe.
+- Wired into repair command: repair = repair_file (structural) THEN repair_loop (error-driven).
+- Confirmed: fix-before-repair order is bulletproof (wrapper runs fix block then repair block by position).
+- core_0 fixed live (was mixed list/mapping networks from compose 5.1.4 strictness).
+
+## repair_loop — FIXERS TO ADD NEXT (onto the working loop)
+- spelling/typo fixer (wrong key names, image typos)
+- truncated-line detector (a line that got cut off mid-paste)
+- name fixer (wrong container/service name)
+- snapshot-piece-pull: LAST RESORT, pull just the broken fragment from .good snapshot (not whole file)
+- per-service up-test-sablier-reassemble loop (Josie's divide-and-conquer)
+- container name-conflict auto-recovery (the kestra "already in use" error -> rm + retry)
