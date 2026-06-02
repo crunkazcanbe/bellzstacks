@@ -41,4 +41,15 @@ right after deploy before Sablier sleeps. SNAPSHOT_DIR/KEEP=5/REQUIRE=none-faile
 
 ## CONSTRAINTS
 - compose 5.1.4 (upgraded 2026-05-21) rejects cross-file depends_on -> only pin same-file families
-- AI cannot see live files; all edits via pasted terminal commands (this is the workflow, keep it)
+- AI cannot see live files; all edits via pasted terminal commands (this is the workflow, keep it)## NEXT SESSION — build the PER-SERVICE REPAIR LOOP (repair command)
+Josie's exact algorithm:
+1. YAML-check the file. If NOT valid -> fix the invalid parts (indentation, etc).
+2. For EACH service: bring up JUST that one service, test it starts.
+3. If it starts fine -> restart Sablier (so the service goes back to sleep).
+4. Put that service back in the compose file -> validate the WHOLE file again.
+5. If valid -> that service is fixed. If not -> continue service by service,
+   restarting Sablier after each, until the whole stack is fixed and valid.
+Divide-and-conquer: prove each service alone, Sablier reset between each, then prove whole.
+Known-good source = snapshot system (snapshot_after_up, already built).
+
+
