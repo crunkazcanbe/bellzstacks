@@ -991,6 +991,31 @@ def inject_depends_on(fpath, cfg):
         if not cnames: return []
         lines = data.splitlines(keepends=True)
 
+        # Pre-pass: strip depends_on from non-head family members (cycle-proof)
+        _strip = set()
+        for _cn in cnames:
+            _h, _m = get_family_of(_cn)
+            if _h and _h != _cn:
+                _strip.add(_cn)
+        for _cn in _strip:
+            _idx = data.find("container_name: " + _cn)
+            if _idx < 0:
+                continue
+            _ln = data[:_idx].count(chr(10))
+            _out = []; _ind = False
+            for _j, _l in enumerate(lines):
+                if (not _ind) and _ln <= _j < _ln + 60 and re.match(r"    depends_on:", _l):
+                    _ind = True
+                    notes.append("stripped depends_on from " + _cn)
+                    continue
+                if _ind:
+                    if re.match(r"      [-{]", _l):
+                        continue
+                    _ind = False
+                _out.append(_l)
+            lines = _out
+            data = "".join(lines)
+
         for cname in cnames:
             head, members = get_family_of(cname)
             if not head or head != cname: continue  # only process family heads
@@ -1944,6 +1969,12 @@ def load_global_inject_conf():
             if '=' in line:
                 k, v = line.split('=', 1)
                 cfg[k.strip()] = v.strip()
+    if str(cfg.get('INJECT_FILL_ALL','0')).lower() in ('1','true','force'):
+        for _k in ('INJECT_DEPLOY','INJECT_BLKIO','INJECT_ULIMITS','INJECT_COMMON_CAPS',
+                   'INJECT_HOSTNAME','INJECT_STORAGE_OPT','INJECT_MAC','INJECT_LABELS',
+                   'INJECT_STOP_GRACE','INJECT_LOGGING','INJECT_CPUSET'):
+            if _k not in cfg:
+                cfg[_k] = '1'
     return cfg
 
 def _gi_enabled(val):
@@ -2041,10 +2072,16 @@ def inject_into_anchor(lines, gi, dry_run=False):
 
     return new_lines, changes
 
-def inject_global_keys(lines, svc, gi, dry_run=False):
+def inject_global_keys(lines, svc, gi, dry_run=False, stack_prefix=''):
     """Inject global keys into a service block. Add-only unless force mode."""
     block = lines[svc['block_start']:svc['block_end']+1]
     block_text = chr(10).join(block)
+    if '<<: *common-caps' in block_text or _gi_enabled(gi.get('INJECT_COMMON_CAPS','0')):
+        _am = re.search(r'^x-common-caps:.*?(?=^\S)', chr(10).join(lines), re.MULTILINE | re.DOTALL)
+        if _am:
+            for _k in re.findall(r'^  ([a-z_]+):', _am.group(0), re.MULTILINE):
+                if (_k + ':') not in block_text:
+                    block_text += chr(10) + '    ' + _k + ':'
     new_lines = list(lines)
     changes = 0
     insert_before = svc['block_end']
@@ -2055,6 +2092,19 @@ def inject_global_keys(lines, svc, gi, dry_run=False):
             break
 
     inserts = []
+
+    _cc = gi.get('INJECT_COMMON_CAPS','0')
+    if _gi_enabled(_cc):
+        if '<<: *common-caps' not in block_text and '&common-caps' in chr(10).join(lines):
+            inserts.append("    <<: *common-caps"); changes += 1
+
+    _hn = gi.get('INJECT_HOSTNAME','0')
+    if _gi_enabled(_hn) and 'hostname:' not in block_text:
+        inserts.append("    hostname: " + svc['name']); changes += 1
+
+    _so = gi.get('INJECT_STORAGE_OPT','0')
+    if _gi_enabled(_so) and 'storage_opt:' not in block_text:
+        inserts.append("    storage_opt: {size: " + gi.get('STORAGE_OPT_SIZE','10G') + "}"); changes += 1
 
     _sg = gi.get('INJECT_STOP_GRACE','0')
     if _gi_enabled(_sg):
@@ -2092,7 +2142,9 @@ def inject_global_keys(lines, svc, gi, dry_run=False):
         mem = gi.get('DEPLOY_MEMORY_LIMIT','2G')
         cpu = gi.get('DEPLOY_CPU_LIMIT','0.20')
         res = gi.get('DEPLOY_MEMORY_RESERVATION','256M')
-        dep_line = f"    deploy: {{resources: {{limits: {{memory: {mem}, cpus: '{cpu}'}}, reservations: {{memory: {res}}}}}}}"
+        _plc = gi.get('DEPLOY_PLACEMENT_CONSTRAINT','').strip()
+        _plc_str = f", placement: {{constraints: [{_plc}]}}" if _plc else ""
+        dep_line = f"    deploy: {{resources: {{limits: {{memory: {mem}, cpus: '{cpu}'}}, reservations: {{memory: {res}}}}}{_plc_str}}}"
         if force or 'deploy:' not in block_text:
             if force and 'deploy:' in block_text:
                 new_lines = [dep_line if re.match(r'^    deploy:', l) else l for l in new_lines]
@@ -2138,6 +2190,40 @@ def inject_global_keys(lines, svc, gi, dry_run=False):
             else:
                 inserts.append(f"    restart: {policy}")
             changes += 1
+
+    _mc = gi.get('INJECT_MAC','0')
+    if _gi_enabled(_mc) and 'mac_address:' not in block_text:
+        import hashlib as _hl
+        _h = _hl.md5(svc['name'].encode()).hexdigest()
+        inserts.append("    mac_address: 02:42:ac:11:%s:%s" % (_h[0:2], _h[2:4]))
+        changes += 1
+
+    _lb = gi.get('INJECT_LABELS','0')
+    if _gi_enabled(_lb):
+        _grp = stack_prefix or 'default'
+        _want = [
+            ('traefik.enable', 'true'),
+            ('sablier.enable', 'true'),
+            ('sablier.group', _grp),
+        ]
+        _missing = [(k, v) for (k, v) in _want
+                    if ('%s=' % k) not in block_text and ('%s:' % k) not in block_text]
+        if _missing:
+            _lbl_idx = None
+            for _i in range(svc['block_start'], min(svc['block_end'] + 1, len(new_lines))):
+                if re.match(r'^    labels:\s*$', new_lines[_i]):
+                    _lbl_idx = _i
+                    break
+            if _lbl_idx is not None:
+                for _k, _v in reversed(_missing):
+                    new_lines.insert(_lbl_idx + 1, '      - "%s=%s"' % (_k, _v))
+                    changes += 1
+            else:
+                _blk = ['    labels:']
+                for _k, _v in _missing:
+                    _blk.append('      - "%s=%s"' % (_k, _v))
+                inserts.extend(_blk)
+                changes += 1
 
     if inserts and not dry_run:
         for ins in reversed(inserts):
@@ -2493,6 +2579,16 @@ def main():
 
     if not os.path.isdir(sd):
         pr(f"{R}✘ Stacks dir not found: {sd}{X}"); sys.exit(1)
+
+    _safety_orig = {}; _safety_valid = {}
+    if not dry_run:
+        import subprocess as _sub
+        for _sf in files:
+            try:
+                _safety_orig[_sf] = open(_sf).read()
+                _safety_valid[_sf] = (_sub.run(["docker","compose","-f",_sf,"config"], capture_output=True).returncode == 0)
+            except Exception:
+                pass
 
     total = 0
 
@@ -2889,7 +2985,7 @@ def main():
 
                 # 1. Add auto_nets to every service
                 for net in auto_nets:
-                    for svc in real_svcs:
+                    for svc in reversed(real_svcs):
                         lines, did_change = inject_network_into_service(
                             lines, svc, net, auto_net_pri, dry_run)
                         if did_change:
@@ -2908,7 +3004,7 @@ def main():
                         if not file_members:
                             continue
                         link_net = grp['net_name']
-                        for svc in real_svcs:
+                        for svc in reversed(real_svcs):
                             if svc['name'] in file_members:
                                 lines, did_change = inject_network_into_service(
                                     lines, svc, link_net, link_pri, dry_run)
@@ -2922,7 +3018,7 @@ def main():
                 # 3. Compose-wide network
                 if do_compose_net:
                     compose_net = f"{stack_name}_net".replace('-', '_')
-                    for svc in real_svcs:
+                    for svc in reversed(real_svcs):
                         lines, did_change = inject_network_into_service(
                             lines, svc, compose_net, compose_net_pri, dry_run)
                         if did_change:
@@ -2954,7 +3050,7 @@ def main():
     # ── Phase 7: Global key injection ───────────────────────────────────────
     gi = load_global_inject_conf()
     _anchor_keys = ['INJECT_STOP_GRACE','INJECT_LOGGING','INJECT_RESTART']
-    _svc_keys = ['INJECT_DEPLOY','INJECT_BLKIO','INJECT_ULIMITS']
+    _svc_keys = ['INJECT_DEPLOY','INJECT_BLKIO','INJECT_ULIMITS','INJECT_COMMON_CAPS','INJECT_HOSTNAME','INJECT_STORAGE_OPT','INJECT_MAC','INJECT_LABELS','INJECT_RESTART']
     _all_keys = _anchor_keys + _svc_keys
     if any(_gi_enabled(gi.get(k,'0')) for k in _all_keys):
         pr(f"\n{C}⚙️  Global key injection{X}")
@@ -2982,8 +3078,10 @@ def main():
                                 if not s['name'].startswith('provisioner')
                                 and s.get('image','')
                                 and not re.match(r'^alpine(:|$)', s.get('image',''))]
-                    for svc in real_svcs:
-                        lines, svc_changes = inject_global_keys(lines, svc, gi, dry_run)
+                    _m = re.match(r'^([a-zA-Z]+)', stack_name)
+                    _sp = _m.group(1) if _m else stack_name
+                    for svc in reversed(real_svcs):  # bottom-up keeps positions valid
+                        lines, svc_changes = inject_global_keys(lines, svc, gi, dry_run, _sp)
                         if svc_changes > 0:
                             _gi_changes += svc_changes
                             changed = True
@@ -3021,7 +3119,7 @@ def main():
                     continue
                 changed = False
                 lines = list(file_lines)
-                for svc in real_svcs:
+                for svc in reversed(real_svcs):  # bottom-up keeps positions valid
                     lines, changes = inject_cpuset(lines, svc, gi, stack_prefix, dry_run)
                     if changes > 0:
                         _cpu_changes += changes
@@ -3039,6 +3137,20 @@ def main():
         total += _cpu_changes
 
 
+    if not dry_run:
+        import subprocess as _sub2
+        for _sf in files:
+            if not _safety_valid.get(_sf):
+                continue
+            try:
+                _chk = _sub2.run(["docker","compose","-f",_sf,"config"], capture_output=True, text=True)
+                if _chk.returncode != 0:
+                    open(_sf,'w').write(_safety_orig[_sf])
+                    _err = (_chk.stderr.strip().splitlines() or ["unknown"])[-1]
+                    pr(f"{R}✘ SAFETY: {_sf.split('/')[-1]} broke validation after fix — REVERTED.{X}")
+                    pr(f"{R}   reason: {_err}{X}")
+            except Exception:
+                pass
     pr(f"\n{G}✨ Done — {total} change(s){'(dry-run, none written)' if dry_run else ''}{X}\n")
 
 if __name__ == '__main__':

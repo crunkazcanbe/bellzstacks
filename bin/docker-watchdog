@@ -1,0 +1,402 @@
+#!/bin/bash
+# ==============================================================================
+# STACKS SERVER OMNI-WATCHDOG
+# Monitors: Docker Engine, Traefik, Sablier, Authentik, CrowdSec, Cloudflare
+# ==============================================================================
+
+WATCHDOG_LOG="/var/log/docker-watchdog.log"
+exec > >(tee -a "$WATCHDOG_LOG") 2>&1
+
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+sleep 120
+log "🛡️ Omni-Watchdog is awake and monitoring 24/7..."
+
+RESTART_COUNT=0
+MAX_RESTARTS=3
+LAST_DAILY=$(date +%s)
+LAST_DAEMON_RESTART=$(date +%s)
+SYSTEMCTL="/bin/systemctl"
+DOCKER="/usr/bin/docker"
+CURL="/usr/bin/curl"
+STACKS="/usr/local/bin/stacks"
+
+# Track per-container failure counts to know when to give up
+declare -A CONTAINER_FAILURES
+
+repair_container() {
+    local c="$1"
+    local failures=${CONTAINER_FAILURES[$c]:-0}
+
+    if [ "$failures" -ge 5 ]; then
+        log "🛑 $c failed 5 times — giving up. Sending stop."
+        $DOCKER stop "$c" >/dev/null 2>&1 || true
+        return
+    fi
+
+    CONTAINER_FAILURES[$c]=$((failures + 1))
+    log "⚠️ Repairing looping container: $c (attempt $((failures + 1))/5)"
+
+    # Step 1: plain restart
+    $DOCKER stop -t 5 "$c" >/dev/null 2>&1 || true
+    $DOCKER start "$c" >/dev/null 2>&1 || true
+    sleep 15
+
+    STATUS=$($DOCKER inspect --format='{{.State.Status}}' "$c" 2>/dev/null)
+    if [ "$STATUS" == "running" ]; then
+        log "✅ $c recovered after restart."
+        CONTAINER_FAILURES[$c]=0
+        $DOCKER restart sablier >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Step 2: recreate
+    log "⚠️ $c still down — trying recreate..."
+    STACK=$(grep -rl "container_name: $c" /srv/stacks/Stacks/*.yml 2>/dev/null | head -1 | xargs basename 2>/dev/null | /usr/bin/sed 's/.yml//')
+    if [ -n "$STACK" ]; then
+        $STACKS up "$STACK" "$c" recreate 2>/dev/null || true
+        sleep 15
+    fi
+
+    STATUS=$($DOCKER inspect --format='{{.State.Status}}' "$c" 2>/dev/null)
+    if [ "$STATUS" == "running" ]; then
+        log "✅ $c recovered after recreate."
+        CONTAINER_FAILURES[$c]=0
+        $DOCKER restart sablier >/dev/null 2>&1 || true
+        return
+    fi
+
+    # Step 3: recreate repair
+    log "⚠️ $c still down — trying recreate repair..."
+    if [ -n "$STACK" ]; then
+        $STACKS up "$STACK" "$c" recreate repair 2>/dev/null || true
+        sleep 15
+    fi
+
+    STATUS=$($DOCKER inspect --format='{{.State.Status}}' "$c" 2>/dev/null)
+    if [ "$STATUS" == "running" ]; then
+        log "✅ $c recovered after recreate repair."
+        CONTAINER_FAILURES[$c]=0
+    else
+        log "❌ $c still not running after all attempts."
+    fi
+
+    $DOCKER restart sablier >/dev/null 2>&1 || true
+}
+
+while true; do
+    CURRENT_TIME=$(date +%s)
+
+    # ── MANUAL PAUSE ─────────────────────────────────────────────────────────
+    if [ -f /var/run/docker-manual-stop ]; then
+        log "⏸️ Manual stop flag detected. Watchdog is paused. Sleeping..."
+        sleep 60
+        continue
+    fi
+
+    # ── SKIP IF STACKS DEPLOYING ─────────────────────────────────────────────
+    STACKS_STATE=$($SYSTEMCTL is-active docker-stacks.service 2>/dev/null)
+    if [[ "$STACKS_STATE" == "active" ]] || [[ "$STACKS_STATE" == "activating" ]]; then
+        log "⏸️ docker-stacks.service is ${STACKS_STATE} — skipping checks."
+        sleep 30
+        continue
+    fi
+
+    # ── LOW CONTAINER COUNT — TRIGGER STACKS UP ─────────────────────────────
+    RUNNING=$($DOCKER ps -q 2>/dev/null | wc -l)
+    if [ "$RUNNING" -lt 20 ]; then
+        log "🚨 Only $RUNNING containers running — triggering docker-stacks restart..."
+        $SYSTEMCTL start docker-stacks.service 2>/dev/null || true
+        sleep 120
+        continue
+    fi
+
+    # ── 24H DAILY MAINTENANCE ────────────────────────────────────────────────
+    if [ $((CURRENT_TIME - LAST_DAILY)) -ge 86400 ]; then
+        log "⏰ 24h maintenance: cleaning up..."
+        LAST_DAILY=$CURRENT_TIME
+
+        # Restart OpenSnitch UI
+        log "⏰ Restarting OpenSnitch..."
+        pkill -f opensnitch-ui 2>/dev/null || true
+        sleep 2
+        sudo -u user DISPLAY=:1 WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 /usr/bin/opensnitch-ui & disown 2>/dev/null || true
+
+        # Clean docker
+        # Safe prune: only truly orphaned stuff, never images/volumes tied to ANY container
+        $DOCKER container prune -f 2>/dev/null || true
+        $DOCKER network prune -f 2>/dev/null || true
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+        sleep 60
+        continue
+    fi
+
+
+    # ── 12H CONTAINERD + DOCKERD RESTART ─────────────────────────────────────
+    if [ $((CURRENT_TIME - LAST_DAEMON_RESTART)) -ge 43200 ]; then
+        log "⏰ 12h daemon restart: safely restarting containerd and dockerd..."
+        LAST_DAEMON_RESTART=$CURRENT_TIME
+        
+        # Safe restart sequence to prevent socket deadlock
+        $SYSTEMCTL stop docker.service 2>/dev/null || true
+        $SYSTEMCTL stop docker.socket 2>/dev/null || true
+        $SYSTEMCTL restart containerd.service 2>/dev/null || true
+        sleep 5
+        $SYSTEMCTL start docker.service 2>/dev/null || true
+        
+        sleep 30
+        log "✅ containerd and dockerd restarted cleanly."
+        continue
+    fi
+
+    # ── DOCKER ENGINE CHECK ───────────────────────────────────────────────────
+    if ! $SYSTEMCTL is-active --quiet docker.service; then
+        log "🚨 docker.service is DOWN. Performing safe recovery restart..."
+        
+        # Safe restart sequence to prevent socket deadlock
+        $SYSTEMCTL stop docker.socket 2>/dev/null || true
+        $SYSTEMCTL restart containerd.service 2>/dev/null || true
+        sleep 5
+        $SYSTEMCTL start docker.service
+        
+        sleep 30
+        continue
+    fi
+
+
+    # ── POWERDEVIL RESET (twice daily at 6am and 6pm) ───────────────────────────
+    CURRENT_HOUR=$(date +%H)
+    CURRENT_MIN=$(date +%M)
+    if [[ ("$CURRENT_HOUR" == "06" || "$CURRENT_HOUR" == "18") && "$CURRENT_MIN" -lt 2 ]]; then
+        log "⏰ Resetting PowerDevil to prevent screen sleep bug..."
+        sudo -u user DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus             XDG_RUNTIME_DIR=/run/user/1000             systemctl --user restart plasma-powerdevil 2>/dev/null || true
+    fi
+
+    # ── CRITICAL CONTAINER CHECK ─────────────────────────────────────────────
+    # Core services — restart immediately if down
+    for c in traefik cloudflared_tunnel_core authentik-server crowdsec; do
+        STATUS=$($DOCKER inspect --format='{{.State.Status}}' "$c" 2>/dev/null)
+        if [ "$STATUS" != "running" ]; then
+            log "⚠️ $c is OFFLINE (${STATUS:-missing}) — restarting..."
+            $DOCKER restart "$c" >/dev/null 2>&1 || true
+        fi
+    done
+
+    # ── SABLIER HEALTH CHECK ──────────────────────────────────────────────────
+    SABLIER_STATUS=$($DOCKER inspect --format='{{.State.Status}}' sablier 2>/dev/null)
+    SABLIER_HEALTH=$($DOCKER inspect --format='{{.State.Health.Status}}' sablier 2>/dev/null)
+    _now=$(date +%s)
+
+    if [ "$SABLIER_STATUS" != "running" ]; then
+        log "🚨 Sablier is DOWN — restarting immediately..."
+        stacks up net_2 sablier recreate >/dev/null 2>&1 || true
+        _SABLIER_UNHEALTHY_SINCE=0
+        _SABLIER_RESTART_COUNT=0
+        sleep 15
+    elif [ "$SABLIER_HEALTH" == "unhealthy" ]; then
+        # Start the 10min timer if not already started
+        _SABLIER_UNHEALTHY_SINCE="${_SABLIER_UNHEALTHY_SINCE:-0}"
+        _SABLIER_RESTART_COUNT="${_SABLIER_RESTART_COUNT:-0}"
+
+        if [ "$_SABLIER_UNHEALTHY_SINCE" -eq 0 ]; then
+            _SABLIER_UNHEALTHY_SINCE=$_now
+            log "⚠️ Sablier unhealthy — starting 10min grace period..."
+        elif [ $((_now - _SABLIER_UNHEALTHY_SINCE)) -gt 600 ]; then
+            # Been unhealthy for 10+ minutes
+            if [ "$_SABLIER_RESTART_COUNT" -lt 2 ]; then
+                _SABLIER_RESTART_COUNT=$((_SABLIER_RESTART_COUNT + 1))
+                log "⚠️ Sablier still unhealthy after 10min (attempt $_SABLIER_RESTART_COUNT/2) — restarting..."
+                stacks up net_2 sablier recreate >/dev/null 2>&1 || true
+                _SABLIER_UNHEALTHY_SINCE=$_now
+                sleep 15
+            else
+                log "🛑 Sablier unhealthy after 2 restart attempts — giving up. Check stacks-status."
+            fi
+        fi
+    else
+        # Healthy — reset counters
+        _SABLIER_UNHEALTHY_SINCE=0
+        _SABLIER_RESTART_COUNT=0
+    fi
+
+    # ── SABLIER-MANAGED SERVICES (slow health check) ──────────────────────────
+    # These sleep via Sablier — only check health after waking, give 10min grace
+    declare -A _WAKE_TIMES
+    for c in netbird-dashboard_one; do  # coolify/dokploy/wazuh are Sablier-managed
+        _cstatus=$($DOCKER inspect --format='{{.State.Status}}' "$c" 2>/dev/null)
+        _chealth=$($DOCKER inspect --format='{{.State.Health.Status}}' "$c" 2>/dev/null)
+
+        if [ "$_cstatus" == "running" ]; then
+            # Container is awake — start 10min timer if not already started
+            _wake_key="_WAKE_${c//[-.]/_}"
+            _wake_time="${!_wake_key:-0}"
+            _now=$(date +%s)
+
+            if [ "$_wake_time" -eq 0 ]; then
+                # Just woke up — start timer
+                eval "${_wake_key}=$_now"
+                log "🔔 $c woke up — starting 10min health grace period"
+            elif [ "$_chealth" == "unhealthy" ] && [ $((_now - _wake_time)) -gt 600 ]; then
+                # Been awake 10+ minutes and still unhealthy
+                _fail_key="_FAIL_${c//[-.]/_}"
+                _fail_count="${!_fail_key:-0}"
+                if [ "$_fail_count" -lt 5 ]; then
+                    _fail_count=$((_fail_count + 1))
+                    eval "${_fail_key}=$_fail_count"
+                    # Find which stack this container belongs to
+                    _stack=$(grep -rl "container_name: $c" /srv/stacks/Stacks/*.yml 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed "s/.yml//")
+                    if [ -n "$_stack" ]; then
+                        if [ "$_fail_count" -le 2 ]; then
+                            log "⚠️ $c unhealthy (attempt $_fail_count/5) — stacks up $_stack $c recreate..."
+                            $STACKS up "$_stack" "$c" recreate >/dev/null 2>&1 || true
+                        else
+                            log "⚠️ $c unhealthy (attempt $_fail_count/5) — stacks up $_stack $c repair recreate..."
+                            $STACKS up "$_stack" "$c" repair recreate >/dev/null 2>&1 || true
+                        fi
+                    else
+                        log "⚠️ $c unhealthy (attempt $_fail_count/5) — docker restart fallback..."
+                        $DOCKER restart "$c" >/dev/null 2>&1 || true
+                    fi
+                    eval "${_wake_key}=$(date +%s)"
+                    sleep 30
+                else
+                    log "🛑 $c failed 5 restart attempts — giving up. Check stacks-status for details."
+                fi
+            elif [ "$_chealth" == "healthy" ]; then
+                # Reset fail counter when healthy
+                eval "_FAIL_${c//[-.]/_}=0"
+            fi
+        else
+            # Container is sleeping — reset wake timer
+            eval "_WAKE_${c//[-.]/_}=0"
+        fi
+    done
+
+    # ── RESTART LOOP KILLER ───────────────────────────────────────────────────
+    LOOPING=$(docker ps -a --filter "status=restarting" --format "{{.Names}}" 2>/dev/null)
+    if [ -n "$LOOPING" ]; then
+        log "⚠️ Looping containers detected: $LOOPING"
+        for c in $LOOPING; do
+            repair_container "$c"
+        done
+    fi
+
+    # ── SITE REACHABILITY CHECK ──────────────────────────────────────────────────
+    declare -A SITE_MAP
+    SITE_MAP["traefik.example.com"]="traefik"
+    SITE_MAP["auth.example.com"]="authentik-server"
+    SITE_MAP["crowdsec.example.com"]="crowdsec"
+    # These are Sablier-managed — 502 means sleeping, not broken. Skip them.
+    # SITE_MAP["coolify.example.com"]="coolify"
+    # SITE_MAP["dokploy.example.com"]="dokploy"
+    # SITE_MAP["wazuh.example.com"]="wazuh.dashboard"
+    SITE_MAP["netbird.example.org"]="netbird-dashboard_one"
+
+    for site in "${!SITE_MAP[@]}"; do
+        container="${SITE_MAP[$site]}"
+        code=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" --max-time 5 -H "Host: $site" http://192.168.1.243:8886 2>/dev/null)
+        if [[ "$code" =~ ^(200|301|302|303|307|308|401|403)$ ]]; then
+            continue
+        fi
+        log "⚠️ $site UNREACHABLE (HTTP ${code:-000}) — attempting smart recovery..."
+
+        # Step 1: restart sablier first
+        log "  🔄 Step 1: restarting sablier..."
+        $DOCKER restart sablier >/dev/null 2>&1 || true
+        sleep 20
+        code=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" --max-time 5 -H "Host: $site" http://192.168.1.243:8886 2>/dev/null)
+        if [[ "$code" =~ ^(200|301|302|303|307|308|401|403)$ ]]; then
+            log "  ✅ $site recovered after sablier restart."
+            continue
+        fi
+
+        # Step 2: restart traefik
+        log "  🔄 Step 2: restarting traefik..."
+        $DOCKER restart traefik >/dev/null 2>&1 || true
+        sleep 20
+        code=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" --max-time 5 -H "Host: $site" http://192.168.1.243:8886 2>/dev/null)
+        if [[ "$code" =~ ^(200|301|302|303|307|308|401|403)$ ]]; then
+            log "  ✅ $site recovered after traefik restart."
+            continue
+        fi
+
+        # Step 3: restart authentik
+        log "  🔄 Step 3: restarting authentik-server..."
+        $DOCKER restart authentik-server >/dev/null 2>&1 || true
+        sleep 20
+        code=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" --max-time 5 -H "Host: $site" http://192.168.1.243:8886 2>/dev/null)
+        if [[ "$code" =~ ^(200|301|302|303|307|308|401|403)$ ]]; then
+            log "  ✅ $site recovered after authentik restart."
+            continue
+        fi
+
+        # Step 4: restart the container itself
+        log "  🔄 Step 4: restarting $container directly..."
+        $DOCKER restart "$container" >/dev/null 2>&1 || true
+        sleep 20
+        code=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" --max-time 5 -H "Host: $site" http://192.168.1.243:8886 2>/dev/null)
+        if [[ "$code" =~ ^(200|301|302|303|307|308|401|403)$ ]]; then
+            log "  ✅ $site recovered after direct restart."
+            continue
+        fi
+
+        # Step 5: restart all three core services together
+        log "  🔄 Step 5: restarting sablier + traefik + authentik together..."
+        $DOCKER restart sablier traefik authentik-server >/dev/null 2>&1 || true
+        sleep 30
+        code=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" --max-time 5 -H "Host: $site" http://192.168.1.243:8886 2>/dev/null)
+        if [[ "$code" =~ ^(200|301|302|303|307|308|401|403)$ ]]; then
+            log "  ✅ $site recovered after full core restart."
+        else
+            log "  🛑 $site still unreachable after all steps — giving up."
+        fi
+    done
+
+    # ── TRAEFIK HTTP CHECK ────────────────────────────────────────────────────
+    HTTP_STATUS=$($CURL -s -o /dev/null -w "%{http_code}" --max-time 5 http://192.168.1.243:8886)
+
+    if [[ "$HTTP_STATUS" == "000" || "$HTTP_STATUS" == 50[0-4] ]]; then
+        if [ "$RESTART_COUNT" -ge "$MAX_RESTARTS" ]; then
+            echo "🛑 Traefik failed $MAX_RESTARTS times. Giving up — manual intervention needed."
+            touch /var/run/docker-manual-stop
+            sleep 60
+            continue
+        fi
+
+        RESTART_COUNT=$((RESTART_COUNT + 1))
+        log "⚠️ WATCHDOG ($RESTART_COUNT/$MAX_RESTARTS): Traefik HTTP $HTTP_STATUS — trying to recover..."
+
+        # Attempt 1: restart container
+        $DOCKER restart traefik >/dev/null 2>&1 || true
+        sleep 30
+
+        HTTP_RECHECK=$($CURL -s -o /dev/null -w "%{http_code}" --max-time 5 http://192.168.1.243:8886)
+        if [[ "$HTTP_RECHECK" == "000" || "$HTTP_RECHECK" == 50[0-4] ]]; then
+            # Attempt 2: stacks up net_2
+            echo "⚠️ Still down — running stacks up net_2..."
+            $STACKS up net_2 2>/dev/null || true
+            sleep 30
+        fi
+
+        HTTP_RECHECK2=$($CURL -s -o /dev/null -w "%{http_code}" --max-time 5 http://192.168.1.243:8886)
+        if [[ "$HTTP_RECHECK2" == "000" || "$HTTP_RECHECK2" == 50[0-4] ]]; then
+            # Attempt 3: stacks up net_2 recreate repair
+            echo "⚠️ Still down — running stacks up net_2 recreate repair..."
+            $STACKS up net_2 recreate repair 2>/dev/null || true
+            sleep 30
+        fi
+
+        $DOCKER restart sablier >/dev/null 2>&1 || true
+        sleep 30
+        continue
+    fi
+
+    # ── RECOVERY ─────────────────────────────────────────────────────────────
+    if [ "$RESTART_COUNT" -gt 0 ]; then
+        log "✅ All systems recovered! Resetting strike counter."
+        RESTART_COUNT=0
+        rm -f /var/run/docker-manual-stop 2>/dev/null || true
+    fi
+
+    sleep 60
+done
