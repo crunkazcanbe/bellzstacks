@@ -52,4 +52,11 @@ Josie's exact algorithm:
 Divide-and-conquer: prove each service alone, Sablier reset between each, then prove whole.
 Known-good source = snapshot system (snapshot_after_up, already built).
 
+CORE PRINCIPLE (Josie): SURGICAL repair only. Replace ONLY the broken piece
+(missing char, bad indent, corrupt chunk) from the snapshot — never the whole
+service or stack. MUST preserve anything Josie added since the snapshot.
+- Broken piece + snapshot exists -> pull just that fragment from snapshot, keep the rest.
+- No snapshot -> validate YAML + structural passes, do everything possible to start it.
+- NEVER strip user additions. Diff-and-patch the broken region, not wholesale replace.
+
 
