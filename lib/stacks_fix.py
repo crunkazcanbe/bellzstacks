@@ -1741,9 +1741,8 @@ def convert_named_to_bind(lines, vol_base, dry_run=False):
                             and vol_name not in external_vols):
                         named_vols[vol_name] = (svc_name, cpath)
 
-    if not named_vols:
-        return lines, 0
-
+    # Even with no service refs to convert, fall through to strip orphaned
+    # top-level volume declarations (repair is the backstop if this over-strips).
     # Replace named vol references with bind mounts
     result = []
     changes = 0
@@ -1765,6 +1764,62 @@ def convert_named_to_bind(lines, vol_base, dry_run=False):
                     changes += 1
                     continue
         result.append(line)
+
+    # ── Strip orphaned top-level volume declarations ──
+    # After converting service refs to bind mounts, any local (external:false)
+    # named volume in the top-level volumes: block that no service still
+    # references is orphaned — remove it. Keeps external:true volumes.
+    still_used = set()
+    for ln in result:
+        st = ln.strip()
+        if st.startswith('-'):
+            v = st.lstrip('- ').strip().strip('"').strip("'")
+            if ':' in v and not v.startswith('/') and not v.startswith('.'):
+                vn = v.split(':')[0].strip()
+                if re.match(r'^[a-zA-Z0-9_-]+$', vn):
+                    still_used.add(vn)
+    out2 = []
+    in_tv = False
+    removed_v = 0
+    for ln in result:
+        if re.match(r'^volumes:\s*$', ln):
+            in_tv = True; out2.append(ln); continue
+        if in_tv:
+            if ln and not ln[0].isspace():
+                in_tv = False; out2.append(ln); continue
+            m = re.match(r'^  ([a-zA-Z0-9_-]+):', ln)
+            if m:
+                vn = m.group(1)
+                # drop only local (external:false) orphans; keep external:true
+                if vn not in still_used and 'external: true' not in ln:
+                    removed_v += 1
+                    continue
+            out2.append(ln); continue
+        out2.append(ln)
+    if removed_v and not dry_run:
+        # If the top-level volumes: block is now empty, drop the header too
+        # (compose rejects an empty "volumes:" — must be a mapping).
+        final = []
+        i = 0
+        while i < len(out2):
+            ln = out2[i]
+            if re.match(r'^volumes:\s*$', ln):
+                # peek: is there any "  name:" entry before the next top-level key?
+                j = i + 1
+                has_entry = False
+                while j < len(out2):
+                    if out2[j] and not out2[j][0].isspace():
+                        break
+                    if re.match(r'^  [a-zA-Z0-9_-]+:', out2[j]):
+                        has_entry = True; break
+                    j += 1
+                if not has_entry:
+                    i += 1  # skip the empty volumes: header
+                    continue
+            final.append(ln)
+            i += 1
+        result = final
+        changes += removed_v
 
     return result, changes
 
