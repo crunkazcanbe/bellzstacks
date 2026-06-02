@@ -78,3 +78,19 @@ service or stack. MUST preserve anything Josie added since the snapshot.
 - snapshot-piece-pull: LAST RESORT, pull just the broken fragment from .good snapshot (not whole file)
 - per-service up-test-sablier-reassemble loop (Josie's divide-and-conquer)
 - container name-conflict auto-recovery (the kestra "already in use" error -> rm + retry)
+
+## SESSION 2026-06-02 (evening) — repair_loop BUILT
+- repair_loop(path): error-driven surgical repair. Runs compose config, reads ONE error,
+  classifies (mixed-form/dup/undefined-net/undefined-depends/cycle/indent), fixes that piece
+  in place, re-validates, loops (max 25), stops if stuck. Backs up .prerepair each write.
+  NEVER reverts whole file, NEVER deletes user additions. TESTED: fixed 3 error types in 3 passes.
+- fix_network_form pass: list/mixed networks -> mapping form (traefik 1000, others 500) + dedupe.
+- Wired into repair command: repair = repair_file (structural) THEN repair_loop (error-driven).
+- core_0 fixed live (mixed list/mapping networks from compose 5.1.4 strictness).
+
+## repair_loop — FIXERS TO ADD NEXT
+- container name-conflict auto-recovery (kestra "already in use" -> rm + retry)
+- truncated-line detector (line cut off mid-paste)
+- spelling/typo + name fixer
+- snapshot-piece-pull: LAST RESORT, pull just broken fragment from .good (not whole file)
+- per-service up-test-sablier-reassemble loop (divide-and-conquer)
