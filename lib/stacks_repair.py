@@ -236,6 +236,9 @@ def repair_file(path, dry_run=False):
     content, f = fix_dependency_cycles(content)
     fixes += f
 
+    content, f = fix_network_form(content)
+    fixes += f
+
     content, f = fix_undefined_networks(content)
     fixes += f
 
@@ -382,6 +385,59 @@ def fix_name_field(content, path):
     lines.insert(insert_at, f'name: {stack_name}')
     fixes.append(f'name_field: set to {stack_name}')
     return '\n'.join(lines), fixes
+
+
+def fix_network_form(content):
+    """Normalize service networks: blocks to mapping form (traefik_net priority 1000,
+    others 500). Fixes mixed list+mapping (compose 5.1.4 rejects mixing) and dedupes.
+    Repairs the exact corruption compose 5.1.4 started rejecting."""
+    fixes = []
+    lines = content.split('\n')
+    out = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        l = lines[i]
+        if re.match(r'^    networks:\s*$', l):
+            out.append(l); i += 1
+            nets = []  # preserve order, dedupe
+            seen = set()
+            mixed = False
+            saw_list = False; saw_map = False
+            while i < n:
+                lm = re.match(r'^      -\s+"?([a-zA-Z0-9_.-]+)"?\s*$', lines[i])
+                mm = re.match(r'^      ([a-zA-Z0-9_.-]+):\s*$', lines[i])
+                if lm:
+                    saw_list = True
+                    net = lm.group(1)
+                    if net not in seen: seen.add(net); nets.append(net)
+                    i += 1
+                elif mm:
+                    saw_map = True
+                    net = mm.group(1)
+                    if net not in seen: seen.add(net); nets.append(net)
+                    i += 1
+                    # skip its child lines (priority etc, 8-space)
+                    while i < n and re.match(r'^        \S', lines[i]):
+                        i += 1
+                elif re.match(r'^      ', lines[i]):
+                    i += 1  # stray indented line, skip
+                else:
+                    break
+            if saw_list and saw_map:
+                mixed = True
+            # rebuild in mapping form
+            for net in nets:
+                pri = 1000 if net == 'traefik_net' else 500
+                out.append('      %s:' % net)
+                out.append('        priority: %d' % pri)
+            if mixed:
+                fixes.append("network_form: normalized mixed list/mapping networks block to mapping form")
+            elif saw_list:
+                fixes.append("network_form: converted list-form networks to mapping form")
+            continue
+        out.append(l); i += 1
+    return '\n'.join(out), fixes
 
 
 def fix_undefined_networks(content):
