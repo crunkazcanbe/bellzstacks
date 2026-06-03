@@ -2040,21 +2040,34 @@ def convert_named_to_bind(lines, vol_base, dry_run=False):
     out2 = []
     in_tv = False
     removed_v = 0
-    for ln in result:
+    _ridx = 0
+    _rlist = result
+    while _ridx < len(_rlist):
+        ln = _rlist[_ridx]
         if re.match(r'^volumes:\s*$', ln):
-            in_tv = True; out2.append(ln); continue
+            in_tv = True; out2.append(ln); _ridx += 1; continue
         if in_tv:
             if ln and not ln[0].isspace():
-                in_tv = False; out2.append(ln); continue
+                in_tv = False; out2.append(ln); _ridx += 1; continue
             m = re.match(r'^  ([a-zA-Z0-9_-]+):', ln)
             if m:
                 vn = m.group(1)
-                # drop only local (external:false) orphans; keep external:true
-                if vn not in still_used and 'external: true' not in ln:
+                # gather this volume's full block: the name line + indented children
+                _blk = [ln]
+                _k = _ridx + 1
+                while _k < len(_rlist) and re.match(r'^    ', _rlist[_k]):
+                    _blk.append(_rlist[_k]); _k += 1
+                _blk_text = chr(10).join(_blk)
+                _is_external = ('external: true' in _blk_text)
+                if vn not in still_used and not _is_external:
                     removed_v += 1
+                    _ridx = _k  # skip the whole block
                     continue
-            out2.append(ln); continue
-        out2.append(ln)
+                out2.extend(_blk)
+                _ridx = _k
+                continue
+            out2.append(ln); _ridx += 1; continue
+        out2.append(ln); _ridx += 1
     if removed_v and not dry_run:
         # If the top-level volumes: block is now empty, drop the header too
         # (compose rejects an empty "volumes:" — must be a mapping).
@@ -2193,6 +2206,11 @@ def set_networks_authoritative(lines, svc, master_net="traefik_net", fam_net=Non
     only traefik_net. fam_net is the family network name (e.g. 'supabase_net')
     or None for a loner. Returns (lines, changed)."""
     bs, be = svc['block_start'], svc['block_end']
+    # Skip services using network_mode: (service:* / host / container:*) —
+    # they share another container's stack and CANNOT have their own networks:.
+    _blk = lines[bs:be+1]
+    if any('network_mode:' in _l for _l in _blk):
+        return lines, False
     # build the desired block
     want = ['    networks:', '      %s:' % master_net, '        priority: 1000']
     if fam_net and fam_net != master_net:
@@ -2524,7 +2542,9 @@ def inject_global_keys(lines, svc, gi, dry_run=False, stack_prefix=''):
 
     _cc = gi.get('INJECT_COMMON_CAPS','0')
     if _gi_enabled(_cc):
-        if '<<: *common-caps' not in block_text and '&common-caps' in chr(10).join(lines):
+        # only add the merge if the service has NO existing '<<:' merge key
+        # (services using *nodns-caps or any other anchor already have one)
+        if '<<:' not in block_text and '&common-caps' in chr(10).join(lines):
             inserts.append("    <<: *common-caps"); changes += 1
 
     _hn = gi.get('INJECT_HOSTNAME','0')
@@ -3539,7 +3559,15 @@ def main():
 
                 # Service-targeted keys: inject into each real service
                 if any(_gi_enabled(gi.get(k,'0')) for k in _svc_keys):
-                    services, _raw = parse_services_with_positions(f)
+                    # parse positions from the CURRENT in-memory lines (anchor
+                    # injection above may have shifted line numbers), NOT stale disk
+                    import tempfile as _tf
+                    _tmpf = _tf.NamedTemporaryFile('w', suffix='.yml', delete=False)
+                    _tmpf.write('\n'.join(lines)); _tmpf.flush(); _tmpf.close()
+                    services, _raw = parse_services_with_positions(_tmpf.name)
+                    try:
+                        import os as _o; _o.unlink(_tmpf.name)
+                    except Exception: pass
                     real_svcs = [s for s in services
                                 if not s['name'].startswith('provisioner')
                                 and s.get('image','')
@@ -3555,6 +3583,9 @@ def main():
                                 pr(f"  {Y}[dry-run] " + svc['name'] + f": {svc_changes} key(s) would be injected{X}")
 
                 if changed and not dry_run:
+                    # strip any accidental duplicate service-level keys before write
+                    _joined = _dedup_service_keys('\n'.join(lines))
+                    lines = _joined.split('\n')
                     _backup(f)
                     open(f, 'w').write('\n'.join(lines))
                     pr(f"  {G}✔ {stack_name}: keys injected{X}")
@@ -3611,6 +3642,10 @@ def main():
             try:
                 _chk = _sub2.run(["docker","compose","-f",_sf,"config"], capture_output=True, text=True)
                 if _chk.returncode != 0:
+                    try:
+                        import shutil as _sh
+                        _sh.copy2(_sf, "/tmp/broken-" + _sf.split("/")[-1])
+                    except Exception: pass
                     _cur = open(_sf).read()
                     _dd = _dedup_service_keys(_cur)
                     if _dd != _cur:
