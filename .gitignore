@@ -1,2 +1,4 @@
 bin/docker-watchdog
 bin/docker-stacks-up
+
+lib/__pycache__/
