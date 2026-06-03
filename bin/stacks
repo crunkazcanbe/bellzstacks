@@ -1924,19 +1924,11 @@ try:
             # Check if group has an existing IP to use
             group_ip = get_group_ip(cname)
             if group_ip:
-                new_ip, new_port = group_ip, find_ip_with_free_port(port)[1] or port
-                if not new_port:
-                    continue
+                # keep related containers together on the group's IP, same port
+                new_ip, new_port = group_ip, port
             else:
                 new_ip, new_port = stable_assign(cname, port)
-                if not new_ip:
-                    # Try image default port
-                    img_m = re.search(r'container_name:\s*' + re.escape(cname) + r'.*?image:\s*(\S+)', data, re.DOTALL)
-                    if img_m:
-                        ports = get_image_default_port(img_m.group(1))
-                        for p in ports:
-                            new_ip, new_port = find_ip_with_free_port(p)
-                            if new_ip: break
+                # default port is kept; if no IP in range has it free, leave as-is
                 if not new_ip: continue
             # Apply fix to YAML
             content = open(fpath).read()
@@ -3413,17 +3405,12 @@ for col in dupes:
                     group_ip = group_ips[gid]
                 break
         if group_ip:
+            # keep related containers together on the group's IP, same port
             new_ip = group_ip
-            new_port = find_ip_with_free_port(port)[1] or port
+            new_port = port
         else:
             new_ip, new_port = stable_assign(cname, port)
-            if not new_ip:
-                # Try image default port
-                img_m = re.search(r"container_name:\s*" + re.escape(cname) + r".*?image:\s*(\S+)", data, re.DOTALL)
-                if img_m:
-                    for p in get_image_default_port(img_m.group(1).strip()):
-                        new_ip, new_port = find_ip_with_free_port(p)
-                        if new_ip: break
+            # default port is kept; if no IP in range has it free, leave as-is
         if not new_ip:
             print(f"  SKIP:  {cname:<30} no free IP found for port {port}")
             skipped += 1

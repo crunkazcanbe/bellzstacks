@@ -542,35 +542,54 @@ def save_ledger(led):
         pass
 
 def stable_assign(cname, port):
-    """Pick an IP for a colliding container WITHOUT rotating across runs.
-    Reuses the container's remembered IP if it's still free for this port;
-    otherwise picks the lowest free IP, records it, and returns it.
+    """Assign an IP to a container KEEPING its (default) port — never changes the
+    port, only the IP. First-fit packing: reuse the container's remembered IP if
+    still free, otherwise the lowest IP in range where this port is free. This
+    packs many containers onto one IP (distinct ports) and only spills the next
+    same-port container onto the next IP.
+
+    The PORT blacklist is intentionally ignored here: we keep the port and move
+    only the IP, so standard ports (6379/5432/3306/27017/...) are fine to keep.
+    IP blacklist, locked IPs, whitelist and live host bindings are still honored.
+    A persistent ledger records the choice so it never rotates across runs.
     Returns (ip, port) or (None, None)."""
     port = str(port)
     cfg = load_conf()
     led = load_ledger()
-    used = set(scan_all_ports().keys())
-    host_ports = scan_host_ports()
+    port_map      = scan_all_ports()
+    host_ports    = scan_host_ports()
     blacklist_ips = set(x.strip() for x in cfg["IP_BLACKLIST"].split(",") if x.strip())
     locked        = set(x.strip() for x in cfg["LOCKED_IPS"].split(",") if x.strip())
+    whitelist     = [x.strip() for x in cfg["IP_WHITELIST"].split(",") if x.strip()]
 
     def _free(ip):
         if not ip or ip in blacklist_ips or ip in locked: return False
-        # the container's OWN current slot counts as free for reuse
-        owners = scan_all_ports().get(f"{ip}:{port}", [])
-        if any(c != cname for (_s, c) in owners): return False
+        # another container already holding ip:port blocks it (our own slot is OK)
+        if any(c != cname for (_s, c) in port_map.get(f"{ip}:{port}", [])): return False
         if ip in host_ports and port in host_ports[ip]: return False
         return True
 
+    # 1) reuse remembered assignment — stops rotation across runs
     rec = led.get(cname, "")
     if rec.endswith(":" + port) and _free(rec.split(":", 1)[0]):
-        return rec.split(":", 1)[0], port      # reuse remembered IP — no rotation
+        return rec.split(":", 1)[0], port
 
-    ip, p = find_ip_with_free_port(port)
-    if ip:
-        led[cname] = f"{ip}:{port}"
-        save_ledger(led)
-        return ip, p
+    # 2) first-fit: lowest IP in range where this exact port is free
+    if whitelist:
+        ips = whitelist
+    else:
+        try:
+            start  = int(cfg["IP_RANGE_START"].split(".")[-1])
+            end    = int(cfg["IP_RANGE_END"].split(".")[-1])
+            prefix = ".".join(cfg["IP_RANGE_START"].split(".")[:3])
+            ips = [f"{prefix}.{i}" for i in range(start, end + 1)]
+        except Exception:
+            ips = []
+    for ip in ips:
+        if _free(ip):
+            led[cname] = f"{ip}:{port}"
+            save_ledger(led)
+            return ip, port
     return None, None
 
 
