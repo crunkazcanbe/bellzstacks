@@ -120,3 +120,29 @@ Do NOT ship without testing inter-service connections survive the rename.
   Dynamics at /srv/stacks/Configs/Dynamics/ reference containers by name (http://name:port).
 - NEXT: build FIX_SYNC_DYNAMICS_NAMES — apply the same old->new rename map across all dynamic config files.
   Then apply_renames must do BOTH stacks + dynamics together. Only run live after both wired.
+
+## DYNAMIC COMMAND GRAMMAR (build next, after fixing rename)
+Josie's spec:
+  stacks dynamics fix                         -> fix ALL dynamic files
+  stacks dynamics <name> fix                  -> fix ONE dynamic
+  stacks up dynamic repair recreate fix info  -> all stacks up (repair/recreate/fix) + fix ALL dynamics, show logs
+  stacks up <stack> <stack> dynamic <dyn> repair recreate fix -> only listed stacks get repair/recreate/fix; only listed dynamic(s) get fixed
+Rules:
+  - 'dynamic'/'dynamics' keyword activates dynamic processing; names after = which (or all if none).
+  - For NOW: fix on a dynamic = ONLY the renaming (per config). NOT automatic in regular stack fix.
+  - Josie wants MANUAL control of dynamics (like manual control of stacks) - regular fix must NOT auto-rename dynamics.
+  - Word order irrelevant (like stacks).
+  - LATER: recreate/rebuild dynamics, auto-add middleware/services with fix.
+
+## RENAME ENGINE — KNOWN BUG to fix first
+apply_renames does BLIND global text replace -> mangles volume names like
+  'oauth2-proxy-postgres_data' (container 'oauth2-proxy-postgres' + '_data').
+FIX: make rename TARGETED, not blind. Only rewrite: container_name, service-key line,
+  hostname, depends_on entries, sablier names=/group, env URLs (@X: //X: ('X').
+  NEVER touch volume mounts (- X_data:/path) or network/volume declaration names.
+Test (depends stripped + rename) got 27 stacks -> only 2 errors, both oauth2 volume/net mangling.
+Config flags exist: FIX_AUTO_NAME_CONTAINERS=1, FIX_SYNC_DYNAMICS_NAMES=1, FIX_RENAME_IGNORE (+ built-in gerbil/pangolin-client/ak-outpost-traefik). All code-default OFF.
+
+## CONFIGURABLE PATHS (already exist, verify universal)
+STACKS_DIR + STACKS_DIR_OVERRIDE, DYNAMICS_DIR + DYNAMICS_DIR_OVERRIDE in conf.
+Some hardcoded paths remain (stacks lines ~1436,1474,2362) - should use $DYNAMICS_DIR var.
