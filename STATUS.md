@@ -12,13 +12,14 @@
 ## DONE this session (2026-06-03)
 - NEW lib/stacks_fix_dynamic.py: reconciles dynamic Traefik configs against real container_names.
   Skips IP backends, auto-fixes separator-variant drift, REPORTS orphans (never deletes). .bak-dynfix backups.
-- Dynamics wired into the dispatcher:
-  - stacks dynamics [name...] fix          -> reconcile names
+- Dynamics wired into the dispatcher (dynamics is OPT-IN via the 'dynamics' keyword + up):
+  - stacks fix                              -> COMPOSE ONLY, never touches dynamics (by design)
+  - stacks dynamics [name...] fix           -> reconcile names (dedicated dynamics-only command)
   - stacks dynamics [name...] repair        -> structural (stacks_repair_dynamic.py, was menu-only)
-  - stacks fix                              -> now fixes compose AND dynamics (FIX_DYNAMICS toggle, default 1)
-  - stacks up <stack> fix / repair          -> per-stack reconciles + repairs its matching dynamic
-  - 'dynamics'/'dyn' keyword sets DO_DYNAMICS
-  - TUI menu Fix buttons call `stacks fix`, so they inherit dynamics automatically (no menu change needed)
+  - stacks up <stack> dynamics fix          -> per-stack: compose fix + reconcile its dynamic + deploy
+  - stacks up <stack> dynamics repair       -> + structural dynamic repair
+  - stacks up <stack> fix   (no 'dynamics') -> compose + deploy only, dynamics untouched
+  - 'dynamics'/'dyn' keyword sets DO_DYNAMICS; FIX_DYNAMICS=0 is a master kill switch
 - info now shows SEPARATE labeled 20-line logs, stacked, no dup: Fix / Repair / Dynamics / Up.
   Per-step logs FIXSTEP_LOG/REPAIRSTEP_LOG/DYNSTEP_LOG; shared _log_tail helper.
 - Fixed blank action-line in fix bar: python3 -u (was block-buffering through the pipe).

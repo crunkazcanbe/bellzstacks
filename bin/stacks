@@ -106,7 +106,7 @@ _register_config_options() {
   _stacks_config_option "INJECT_ULIMITS"       "0"   "Inject ulimits into services"
   _stacks_config_option "STACKS_DIR_OVERRIDE"  ""    "Override stacks directory location"
   _stacks_config_option "DYNAMICS_DIR_OVERRIDE" ""   "Override dynamics directory location"
-  _stacks_config_option "FIX_DYNAMICS"         "1"   "fix/up also reconciles dynamic names against stacks"
+  _stacks_config_option "FIX_DYNAMICS"         "1"   "master switch for dynamics ops during 'up ... dynamics' (0=disable)"
 }
 
 
@@ -1119,8 +1119,8 @@ PYEOF
       update_ui "🔗 Defined missing infra: ${_added:0:40}" "$p2"
       sleep 0.8
     fi
-    # Reconcile this stack's dynamic file (name drift) — quiet, logged
-    if [ "${FIX_DYNAMICS:-1}" != "0" ] || [ "$DO_DYNAMICS" -eq 1 ]; then
+    # Reconcile this stack's dynamic file ONLY when 'dynamics' keyword was given
+    if [ "$DO_DYNAMICS" -eq 1 ] && [ "${FIX_DYNAMICS:-1}" != "0" ]; then
       update_ui "⚡ Reconciling dynamic for $stack..." "$p2"
       _dynout=$(run_dynamics_fix fix "$stack" 2>&1)
       echo "$_dynout" | log_output
@@ -1139,8 +1139,8 @@ PYEOF
     if [ "${_rn:-0}" != "0" ]; then
       update_ui "🔧 Repaired $stack: ${_rn} fix(es)" "$p2"; sleep 0.8
     fi
-    # Structural repair of this stack's dynamic file — quiet, logged
-    if [ "${FIX_DYNAMICS:-1}" != "0" ] || [ "$DO_DYNAMICS" -eq 1 ]; then
+    # Structural repair of this stack's dynamic file ONLY when 'dynamics' keyword given
+    if [ "$DO_DYNAMICS" -eq 1 ] && [ "${FIX_DYNAMICS:-1}" != "0" ]; then
       _dynrep=$(run_dynamics_fix repair "$stack" 2>&1)
       echo "$_dynrep" | log_output
       { echo "── $stack (dynamic) ──"; echo "$_dynrep"; } >> "$REPAIRSTEP_LOG"
@@ -3485,26 +3485,16 @@ COLFIX
   printf "\e[?25h"
   echo -e "\e[1;32m✨ Fix complete\e[0m"
 
-  # ── Reconcile dynamics against the (now-fixed) stacks ─────────────────────
-  # Output goes to its OWN log so `info` can show fix-log and dynamics-log
-  # separately. Without `info` we print only a one-line summary.
-  _dynlog="/tmp/stacks-dynfix-$$.log"; : > "$_dynlog"
-  if [ "${FIX_DYNAMICS:-1}" != "0" ] || [ "$DO_DYNAMICS" -eq 1 ]; then
-    _dyntargets=()
-    if [ ${#PARSED_STACKS[@]} -gt 0 ]; then _dyntargets=("${PARSED_STACKS[@]}")
-    elif [ -n "$TARGET_STACK" ]; then _dyntargets=("$TARGET_STACK")
-    else _dyntargets=(all); fi
-    run_dynamics_fix fix "${_dyntargets[@]}" > "$_dynlog" 2>&1
-    _dsum=$(grep -oE "Total name fixes: [0-9]+ across [0-9]+ file\(s\); [0-9]+ orphan ref\(s\)" "$_dynlog" | tail -1)
-    echo -e "\e[1;35m⚡ Dynamics:\e[0m ${_dsum:-reconciled}"
-  fi
+  # NOTE: `stacks fix` fixes COMPOSE ONLY — it never touches dynamics.
+  # Dynamics are reconciled via `stacks up <stack> dynamics fix` (during deploy)
+  # or the dedicated `stacks dynamics fix` command. This keeps `up … dynamics`
+  # meaningful instead of being silently done here.
 
-  # ── info: stacked, labeled 20-line tail of EACH operation's log ───────────
+  # ── info: labeled 20-line tail of the fix log ─────────────────────────────
   if [ "$DO_INFO" -eq 1 ]; then
-    _log_tail "🔧 Fix log"     36 "$_fixlog"
-    _log_tail "⚡ Dynamics log" 35 "$_dynlog"
+    _log_tail "🔧 Fix log" 36 "$_fixlog"
   fi
-  rm -f "$_fixlog" "$_dynlog" 2>/dev/null || true
+  rm -f "$_fixlog" 2>/dev/null || true
   exit 0
 
 fi
