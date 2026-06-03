@@ -70,6 +70,7 @@ def load_conf():
         "FIX_AUTO_NETWORKS": "",                         # space-separated networks to add to every service
         "FIX_AUTO_LINK_NETWORKS": "0",
         "FIX_AUTHORITATIVE_NETWORKS": "1",  # 1=wipe+set exact nets (removes junk); 0=additive
+        "FIX_FORCE_VOLUME_BASE": "0",  # 1=force ALL /home/*/docker/ bind paths to FIX_VOLUME_BASE (normalize). DEFAULT OFF
         "FIX_AUTO_NAME_CONTAINERS": "0",  # 1=rename containers (loner=oneword, family=root_role) + update all refs. DEFAULT OFF for others
         "FIX_SYNC_DYNAMICS_NAMES": "0",  # 1=also apply rename to Traefik dynamic configs (keeps routing in sync). DEFAULT OFF
         "FIX_SYNC_ALL_NAMES": "0",  # 1=rename ALL refs (flags, depends_on, service-keys, hostname, env URLs) to match container. scan-based. DEFAULT OFF                   # auto-gen stackname_net for stacks with 2+ services
