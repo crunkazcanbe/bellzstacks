@@ -107,6 +107,15 @@ _register_config_options() {
   _stacks_config_option "STACKS_DIR_OVERRIDE"  ""    "Override stacks directory location"
   _stacks_config_option "DYNAMICS_DIR_OVERRIDE" ""   "Override dynamics directory location"
   _stacks_config_option "FIX_DYNAMICS"         "1"   "master switch for dynamics ops during 'up ... dynamics' (0=disable)"
+  # ── IP/port collision auto-fix settings ──
+  _stacks_config_option "IP_COLLISION_AUTOFIX" "1"   "Enable IP/port collision auto-move (first-fit pack, keep default port)"
+  _stacks_config_option "IP_BLACKLIST"         "192.168.1.1,192.168.1.114,192.168.1.151" "IPs the collision fixer will NEVER assign (comma-separated)"
+  _stacks_config_option "PORT_BLACKLIST"       "22,80,443,3306,5432,6379,27017,2375,2376" "Ports never assigned as a NEW port (default ports are still kept)"
+  _stacks_config_option "IP_WHITELIST"         ""    "If set, ONLY these IPs are used (comma-separated; overrides range)"
+  _stacks_config_option "IP_RANGE_START"       "192.168.1.153" "First IP in the assignable pool"
+  _stacks_config_option "IP_RANGE_END"         "192.168.1.253" "Last IP in the assignable pool"
+  _stacks_config_option "PORT_RANGE_START"     "8080" "Lowest port used for a last-resort port move"
+  _stacks_config_option "PORT_RANGE_END"       "8999" "Highest port used for a last-resort port move"
 }
 
 
