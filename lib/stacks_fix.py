@@ -3611,6 +3611,14 @@ def main():
             try:
                 _chk = _sub2.run(["docker","compose","-f",_sf,"config"], capture_output=True, text=True)
                 if _chk.returncode != 0:
+                    _cur = open(_sf).read()
+                    _dd = _dedup_service_keys(_cur)
+                    if _dd != _cur:
+                        open(_sf,'w').write(_dd)
+                        _chk2 = _sub2.run(["docker","compose","-f",_sf,"config"], capture_output=True, text=True)
+                        if _chk2.returncode == 0:
+                            pr(f"{G}✔ SAFETY: {_sf.split('/')[-1]} duplicate keys auto-deduped, now valid{X}")
+                            continue
                     open(_sf,'w').write(_safety_orig[_sf])
                     _err = (_chk.stderr.strip().splitlines() or ["unknown"])[-1]
                     pr(f"{R}✘ SAFETY: {_sf.split('/')[-1]} broke validation after fix — REVERTED.{X}")
@@ -3618,6 +3626,25 @@ def main():
             except Exception:
                 pass
     pr(f"\n{G}✨ Done — {total} change(s){'(dry-run, none written)' if dry_run else ''}{X}\n")
+
+def _dedup_service_keys(content):
+    DEDUP = {"storage_opt","stop_grace_period","stop_signal","restart","user","privileged","logging","dns","tmpfs","sysctls","security_opt","cap_add","mem_limit","shm_size"}
+    lines = content.split(chr(10)); out = []; seen = set(); i = 0
+    while i < len(lines):
+        l = lines[i]
+        if re.match(r"^  [A-Za-z0-9_.-]+:\s*$", l):
+            seen = set(); out.append(l); i += 1; continue
+        m = re.match(r"^    ([A-Za-z_][A-Za-z0-9_]*):", l)
+        if m and m.group(1) in DEDUP:
+            key = m.group(1)
+            if key in seen:
+                i += 1
+                while i < len(lines) and re.match(r"^      ", lines[i]): i += 1
+                continue
+            seen.add(key)
+        out.append(l); i += 1
+    return chr(10).join(out)
+
 
 if __name__ == '__main__':
     main()
