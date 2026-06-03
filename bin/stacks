@@ -1886,7 +1886,7 @@ import sys, re
 sys.path.insert(0, '/usr/local/lib')
 try:
     from stacks_collision import (
-        get_collisions, find_ip_with_free_port,
+        get_collisions, find_ip_with_free_port, stable_assign,
         is_locked_container, get_related_containers,
         get_image_default_port, scan_all_ports
     )
@@ -1928,7 +1928,7 @@ try:
                 if not new_port:
                     continue
             else:
-                new_ip, new_port = find_ip_with_free_port(port)
+                new_ip, new_port = stable_assign(cname, port)
                 if not new_ip:
                     # Try image default port
                     img_m = re.search(r'container_name:\s*' + re.escape(cname) + r'.*?image:\s*(\S+)', data, re.DOTALL)
@@ -3376,7 +3376,7 @@ elif [ "$COMMAND" == "fix" ]; then
 import sys, re, glob
 sys.path.insert(0, '/usr/local/lib')
 from stacks_collision import (
-    get_collisions, find_ip_with_free_port,
+    get_collisions, find_ip_with_free_port, stable_assign,
     is_locked_container, get_related_containers,
     get_image_default_port, scan_all_ports
 )
@@ -3416,7 +3416,7 @@ for col in dupes:
             new_ip = group_ip
             new_port = find_ip_with_free_port(port)[1] or port
         else:
-            new_ip, new_port = find_ip_with_free_port(port)
+            new_ip, new_port = stable_assign(cname, port)
             if not new_ip:
                 # Try image default port
                 img_m = re.search(r"container_name:\s*" + re.escape(cname) + r".*?image:\s*(\S+)", data, re.DOTALL)

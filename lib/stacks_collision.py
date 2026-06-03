@@ -514,6 +514,66 @@ def find_ip_with_free_port(port):
 
     return None, None
 
+
+# ── Sticky assignment ledger (stops IP rotation across runs) ──────────────────
+LEDGER_FILE = os.path.expanduser("~/.config/stacks/ip_assignments.conf")
+
+def load_ledger():
+    """container_name -> 'ip:port' remembered assignments."""
+    led = {}
+    try:
+        for line in open(LEDGER_FILE):
+            l = line.strip()
+            if "=" in l and not l.startswith("#"):
+                k, v = l.split("=", 1)
+                led[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return led
+
+def save_ledger(led):
+    try:
+        os.makedirs(os.path.dirname(LEDGER_FILE), exist_ok=True)
+        with open(LEDGER_FILE, "w") as f:
+            f.write("# container_name=ip:port — remembered IP assignments (stops rotation)\n")
+            for k in sorted(led):
+                f.write("%s=%s\n" % (k, led[k]))
+    except OSError:
+        pass
+
+def stable_assign(cname, port):
+    """Pick an IP for a colliding container WITHOUT rotating across runs.
+    Reuses the container's remembered IP if it's still free for this port;
+    otherwise picks the lowest free IP, records it, and returns it.
+    Returns (ip, port) or (None, None)."""
+    port = str(port)
+    cfg = load_conf()
+    led = load_ledger()
+    used = set(scan_all_ports().keys())
+    host_ports = scan_host_ports()
+    blacklist_ips = set(x.strip() for x in cfg["IP_BLACKLIST"].split(",") if x.strip())
+    locked        = set(x.strip() for x in cfg["LOCKED_IPS"].split(",") if x.strip())
+
+    def _free(ip):
+        if not ip or ip in blacklist_ips or ip in locked: return False
+        # the container's OWN current slot counts as free for reuse
+        owners = scan_all_ports().get(f"{ip}:{port}", [])
+        if any(c != cname for (_s, c) in owners): return False
+        if ip in host_ports and port in host_ports[ip]: return False
+        return True
+
+    rec = led.get(cname, "")
+    if rec.endswith(":" + port) and _free(rec.split(":", 1)[0]):
+        return rec.split(":", 1)[0], port      # reuse remembered IP — no rotation
+
+    ip, p = find_ip_with_free_port(port)
+    if ip:
+        led[cname] = f"{ip}:{port}"
+        save_ledger(led)
+        return ip, p
+    return None, None
+
+
 if __name__ == "__main__":
     import sys as _sys
     # --find-port PORT SVC FILE mode for use by repair command
