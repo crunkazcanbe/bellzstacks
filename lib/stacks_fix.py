@@ -1971,17 +1971,17 @@ def get_service_groups(services):
     return result
 
 
-def set_networks_authoritative(lines, svc, fam_net=None, stack_net=None):
+def set_networks_authoritative(lines, svc, master_net="traefik_net", fam_net=None, stack_net=None):
     """AUTHORITATIVE: wipe the service's networks: block and set exactly the
     correct nets — traefik_net (1000) + optional family net (500). Loners get
     only traefik_net. fam_net is the family network name (e.g. 'supabase_net')
     or None for a loner. Returns (lines, changed)."""
     bs, be = svc['block_start'], svc['block_end']
     # build the desired block
-    want = ['    networks:', '      traefik_net:', '        priority: 1000']
-    if fam_net and fam_net != 'traefik_net':
+    want = ['    networks:', '      %s:' % master_net, '        priority: 1000']
+    if fam_net and fam_net != master_net:
         want += ['      %s:' % fam_net, '        priority: 500']
-    if stack_net and stack_net not in ('traefik_net', fam_net):
+    if stack_net and stack_net not in (master_net, fam_net):
         want += ['      %s:' % stack_net, '        priority: 200']
     # find existing networks: block within the service
     out = []
@@ -3202,8 +3202,9 @@ def main():
                 # AUTHORITATIVE network assignment per service:
                 #   traefik_net(1000) + family_net(500 if in family) + stack_net(200 if enabled)
                 from stacks_families import get_family_of as _gfo
+                _master = (auto_nets[0] if auto_nets else "traefik_net")
                 _stk = f"{stack_name}_net".replace('-', '_') if do_compose_net else None
-                _used_nets = set(['traefik_net'])
+                _used_nets = set([_master])
                 for svc in reversed(real_svcs):
                     _blk = lines[svc['block_start']:svc['block_end']+1]
                     _cn = svc['name']
@@ -3216,7 +3217,7 @@ def main():
                         if _h:
                             _root = _h.replace('.', '-').replace('_', '-').split('-')[0]
                             _fnet = f"{_root}_net"
-                    lines, did_change = set_networks_authoritative(lines, svc, _fnet, _stk)
+                    lines, did_change = set_networks_authoritative(lines, svc, _master, _fnet, _stk)
                     if _fnet: _used_nets.add(_fnet)
                     if _stk: _used_nets.add(_stk)
                     if did_change:
