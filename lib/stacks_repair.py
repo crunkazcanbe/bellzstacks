@@ -242,6 +242,21 @@ def repair_file(path, dry_run=False):
     content, f = fix_undefined_networks(content)
     fixes += f
 
+    # orphan network removal — gated on FIX_REMOVE_ORPHANS (default off)
+    try:
+        import os as _os
+        _conf = _os.path.expanduser("~/.config/stacks/stacks.conf")
+        _remove_orphans = False
+        if _os.path.exists(_conf):
+            for _l in open(_conf):
+                if _l.strip().startswith('FIX_REMOVE_ORPHANS='):
+                    _remove_orphans = _l.strip().split('=',1)[1].strip().strip('"') in ('1','on','true','True')
+        if _remove_orphans:
+            content, f = fix_orphan_networks(content)
+            fixes += f
+    except Exception:
+        pass
+
     if not dry_run and content != original:
         # back up the broken file before writing the repaired version
         try:
@@ -437,6 +452,43 @@ def fix_network_form(content):
                 fixes.append("network_form: converted list-form networks to mapping form")
             continue
         out.append(l); i += 1
+    return '\n'.join(out), fixes
+
+
+def fix_orphan_networks(content):
+    """Remove top-level network declarations that NO service references.
+    Provisioner-safe: if a provisioner attaches to the net (in its networks
+    block) it counts as used. Only removes truly dead declarations."""
+    fixes = []
+    lines = content.split('\n')
+    # collect top-level declared nets (under 'networks:')
+    declared = {}
+    in_net = False
+    for idx, line in enumerate(lines):
+        if re.match(r'^networks:\s*$', line):
+            in_net = True; continue
+        if re.match(r'^[a-zA-Z]', line) and not line.startswith(' '):
+            in_net = False
+        if in_net:
+            m = re.match(r'^  ([a-zA-Z0-9_.-]+):', line)
+            if m:
+                declared[m.group(1)] = idx
+    # collect nets referenced anywhere in a service networks block (6-space) or list form
+    used = set(re.findall(r'^      ([a-zA-Z0-9_.-]+):', content, re.M))
+    used |= set(re.findall(r'^\s+-\s+"?([a-zA-Z0-9_.-]+)"?\s*$', content, re.M))
+    # never remove traefik_net (universal) even if it looks unused
+    protected = {'traefik_net'}
+    orphans = [n for n in declared if n not in used and n not in protected and n.endswith('_net')]
+    if not orphans:
+        return content, fixes
+    # remove each orphan's declaration line (handles one-line {..} form)
+    out = []
+    for line in lines:
+        m = re.match(r'^  ([a-zA-Z0-9_.-]+):', line)
+        if m and m.group(1) in orphans:
+            fixes.append("orphan_network: removed unused '%s'" % m.group(1))
+            continue
+        out.append(line)
     return '\n'.join(out), fixes
 
 
