@@ -111,3 +111,12 @@ Build order: (1) compute new name per svc from family head+role, (2) build old->
   ALL containers first, (3) do a global find/replace of references across all 30 files using the map,
   (4) test on copies, confirm depends/connections still resolve, (5) flag-gate, default off.
 Do NOT ship without testing inter-service connections survive the rename.
+
+## RENAME ENGINE — BUILT, do NOT run live until dynamics synced
+- build_rename_map / rename_report / apply_renames in stacks_fix.py. 232 renames, NO collisions, db_2 test validates.
+- Flag FIX_AUTO_NAME_CONTAINERS (code default 0, Josie's conf =1).
+- Rule: loner=drop dashes to one word; family=root_role; gerbil/pangolin-client excluded.
+- CRITICAL BLOCKER: renaming containers WITHOUT updating Traefik dynamic configs breaks routing.
+  Dynamics at /srv/stacks/Configs/Dynamics/ reference containers by name (http://name:port).
+- NEXT: build FIX_SYNC_DYNAMICS_NAMES — apply the same old->new rename map across all dynamic config files.
+  Then apply_renames must do BOTH stacks + dynamics together. Only run live after both wired.

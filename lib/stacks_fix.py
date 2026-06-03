@@ -69,7 +69,8 @@ def load_conf():
         "FIX_CREATE_VOLUME_DIRS": "0",                   # auto-create host directories for bind mounts
         "FIX_AUTO_NETWORKS": "",                         # space-separated networks to add to every service
         "FIX_AUTO_LINK_NETWORKS": "0",
-        "FIX_AUTHORITATIVE_NETWORKS": "1",  # 1=wipe+set exact nets (removes junk); 0=additive                   # auto-gen stackname_net for stacks with 2+ services
+        "FIX_AUTHORITATIVE_NETWORKS": "1",  # 1=wipe+set exact nets (removes junk); 0=additive
+        "FIX_AUTO_NAME_CONTAINERS": "0",  # 1=rename containers (loner=oneword, family=root_role) + update all refs. DEFAULT OFF for others                   # auto-gen stackname_net for stacks with 2+ services
         "FIX_REMOVE_GAPS": "0",  # set to 0 to disable blank line removal in service blocks
         "FIX_HC_IGNORE_STACKS": "",  # space-separated stack files to skip healthcheck changes
         "FIX_REPLACE_BROKEN_HC": "0",  # set to 1 to replace actively-failing healthchecks
@@ -1678,6 +1679,90 @@ def create_volume_dirs(paths, dry_run=False):
                     created.append(f"failed: {path} ({e})")
     return created
 
+def apply_renames(stacks_dir, rmap, dry_run=True):
+    """Apply old->new container renames across ALL files, updating every reference.
+    Replaces whole-word occurrences (longest names first to avoid partial matches).
+    dry_run=True returns a per-file change count without writing."""
+    import glob as _g
+    # sort by length desc so 'coolify-db' is replaced before 'coolify'
+    pairs = sorted(rmap.items(), key=lambda kv: -len(kv[0]))
+    report = {}
+    for f in sorted(_g.glob(_os.path.join(stacks_dir, '*.yml'))):
+        txt = open(f).read()
+        orig = txt
+        n = 0
+        for old, new in pairs:
+            # whole-word: not preceded/followed by name-char (handles quotes, :, /, space)
+            pat = r'(?<![A-Za-z0-9_.-])' + re.escape(old) + r'(?![A-Za-z0-9_.-])'
+            txt, c = re.subn(pat, new, txt)
+            n += c
+        if n and txt != orig:
+            report[_os.path.basename(f)] = n
+            if not dry_run:
+                shutil.copy2(f, f + '.bak-rename-%d' % int(time.time()))
+                open(f, 'w').write(txt)
+    return report
+
+
+def build_rename_map(stacks_dir):
+    """Build {old_name: new_name} for all containers. Loner=drop dashes to one
+    word; family member=<root>_<role>. Excludes gerbil (whitelist member)."""
+    import glob as _g
+    from stacks_families import get_family_of
+    names = []
+    for f in sorted(_g.glob(_os.path.join(stacks_dir, '*.yml'))):
+        for cn in re.findall(r'container_name:\s*(\S+)', open(f).read()):
+            names.append(cn.strip().strip('"').strip("'"))
+    EXCLUDE = {'gerbil', 'pangolin-client'}  # whitelist family - renaming breaks refs
+    # compute families ONCE, then look up (avoid re-running detection per container)
+    from stacks_families import get_families as _gf
+    _fams = _gf()
+    _lookup = {}
+    for _h, _mem in _fams.items():
+        for _m in _mem:
+            _lookup[_m] = (_h, _mem)
+    rmap = {}
+    seen = set()
+    for cn in names:
+        if cn in seen: continue
+        seen.add(cn)
+        if cn in EXCLUDE:
+            continue
+        head, members = _lookup.get(cn, (None, None))
+        if head and members and len(members) >= 2:
+            root = head.replace('.', '-').replace('_', '-').split('-')[0]
+            if cn == root:
+                nw = root
+            else:
+                parts = cn.replace('.', '-').replace('_', '-').split('-')
+                role = [x for x in parts if x != root]
+                nw = (root + '_' + '_'.join(role)) if role else cn
+        else:
+            nw = cn.replace('-', '').replace('.', '')
+        if nw != cn:
+            rmap[cn] = nw
+    return rmap
+
+
+def rename_report(stacks_dir):
+    """Dry-run: return (rmap, collisions). collisions = names that would clash."""
+    rmap = build_rename_map(stacks_dir)
+    # all final names (renamed + unchanged) to detect clashes
+    import glob as _g
+    all_final = {}
+    seen = set()
+    for f in sorted(_g.glob(_os.path.join(stacks_dir, '*.yml'))):
+        for cn in re.findall(r'container_name:\s*(\S+)', open(f).read()):
+            cn = cn.strip().strip('"').strip("'")
+            if cn in seen: continue
+            seen.add(cn)
+            fin = rmap.get(cn, cn)
+            all_final.setdefault(fin, []).append(cn)
+    collisions = {k: v for k, v in all_final.items() if len(v) > 1}
+    return rmap, collisions
+
+
+import os as _os
 def strip_provisioner_volumes(lines, dry_run=False):
     """In bind mode, provisioner/creator services only create networks — they need
     NO volumes. Strip the entire volumes: block from any service whose container_name
