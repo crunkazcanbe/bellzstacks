@@ -70,7 +70,8 @@ def load_conf():
         "FIX_AUTO_NETWORKS": "",                         # space-separated networks to add to every service
         "FIX_AUTO_LINK_NETWORKS": "0",
         "FIX_AUTHORITATIVE_NETWORKS": "1",  # 1=wipe+set exact nets (removes junk); 0=additive
-        "FIX_AUTO_NAME_CONTAINERS": "0",  # 1=rename containers (loner=oneword, family=root_role) + update all refs. DEFAULT OFF for others                   # auto-gen stackname_net for stacks with 2+ services
+        "FIX_AUTO_NAME_CONTAINERS": "0",  # 1=rename containers (loner=oneword, family=root_role) + update all refs. DEFAULT OFF for others
+        "FIX_SYNC_DYNAMICS_NAMES": "0",  # 1=also apply rename to Traefik dynamic configs (keeps routing in sync). DEFAULT OFF                   # auto-gen stackname_net for stacks with 2+ services
         "FIX_REMOVE_GAPS": "0",  # set to 0 to disable blank line removal in service blocks
         "FIX_HC_IGNORE_STACKS": "",  # space-separated stack files to skip healthcheck changes
         "FIX_REPLACE_BROKEN_HC": "0",  # set to 1 to replace actively-failing healthchecks
@@ -1713,7 +1714,7 @@ def build_rename_map(stacks_dir):
     for f in sorted(_g.glob(_os.path.join(stacks_dir, '*.yml'))):
         for cn in re.findall(r'container_name:\s*(\S+)', open(f).read()):
             names.append(cn.strip().strip('"').strip("'"))
-    EXCLUDE = {'gerbil', 'pangolin-client'}  # whitelist family - renaming breaks refs
+    EXCLUDE = {'gerbil', 'pangolin-client', 'ak-outpost-traefik'}  # whitelist + authentik-managed outpost (authentik spawns it by this exact name; renaming breaks it)
     # compute families ONCE, then look up (avoid re-running detection per container)
     from stacks_families import get_families as _gf
     _fams = _gf()
@@ -2946,6 +2947,32 @@ def main():
                 open(f, 'w').write('\n'.join(lines))
                 pr(f"  {G}✔ Named {stack_name}{X}")
                 total += 1
+
+    # ── Phase 0.4: Container auto-naming (config-gated, default off) ─────────
+    if on(cfg.get("FIX_AUTO_NAME_CONTAINERS", "0")):
+        pr(f"\n{C}\U0001f3f7  Container auto-naming{X}")
+        try:
+            _rmap, _coll = rename_report(sd)
+            if _coll:
+                pr(f"  {R}\u2718 rename SKIPPED \u2014 name collisions detected:{X}")
+                for _nw, _olds in list(_coll.items())[:5]:
+                    pr(f"    {R}{_olds} -> {_nw}{X}")
+            elif _rmap:
+                _rep1 = apply_renames(sd, _rmap, dry_run)
+                _dyn = cfg.get("DYNAMICS_DIR", "/srv/stacks/Configs/Dynamics")
+                if on(cfg.get("FIX_SYNC_DYNAMICS_NAMES", "0")) and _os.path.isdir(_dyn):
+                    _rep2 = apply_renames(_dyn, _rmap, dry_run)
+                else:
+                    _rep2 = {}
+                if dry_run:
+                    pr(f"  {Y}[dry-run] would rename {len(_rmap)} containers across {len(_rep1)} stack(s) + {len(_rep2)} dynamic(s){X}")
+                else:
+                    pr(f"  {G}\u2714 renamed {len(_rmap)} containers across {len(_rep1)} stack(s) + {len(_rep2)} dynamic(s){X}")
+                    total += len(_rep1) + len(_rep2)
+            else:
+                pr(f"  {G}\u2714 all container names already clean{X}")
+        except Exception as _ne:
+            pr(f"  {R}\u2718 auto-naming error: {_ne}{X}")
 
     # ── Phase 0.5: Corruption repair ────────────────────────────────────────
     # Uses stacks_repair.py — learned from dev_1.yml reference file
