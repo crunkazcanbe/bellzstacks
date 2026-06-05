@@ -1,0 +1,185 @@
+# ════════════════════════════════════════════════════════════════════════════
+#  dynamics.yaml  —  controls `stacks dynamics generate`
+#  Copy this to  ~/.config/stacks/dynamics.yaml  and edit for your setup.
+#  Every Traefik dynamic feature is a toggle. Generic: works for ANY stacks,
+#  nothing hardcoded. The generator reads this file; nothing is baked in code.
+# ════════════════════════════════════════════════════════════════════════════
+
+domain:
+  primary:   example.com          # your public domain — every Host() rule uses this
+  secondary: example.net          # optional alternate
+  use:       primary              # primary | secondary
+
+# ── Which top-level sections to emit ──────────────────────────────────────────
+generate:
+  routers:     true
+  services:    true
+  middlewares: true
+  transports:  true
+  tcp:         true               # DB TCP routers, each on its own dedicated port
+
+# ── HTTP middleware chain applied to every generated router (order matters) ───
+chain:
+  - sablier
+  - cloudflare-ipallow
+  - https-header
+  - crowdsec_bouncer
+  - authentik-auth
+  - global-retry
+  - compress
+  - inflight
+  - buffering
+  - rate-limit
+
+# ── Feature toggles. Each value: true | false | auto ──────────────────────────
+#   'auto' = detect whether that infra is installed in your stacks and enable
+#   accordingly (authentik / crowdsec / sablier / error_pages support auto).
+features:
+  authentik:          true        # the MAIN gate (forwardAuth)
+  crowdsec:           true        # crowdsec bouncer (forwardAuth)
+  sablier:            true        # sleep/wake; skipped for sablier.enable=false services
+  https_header:       true        # security response headers
+  https_redirect:     true
+  global_retry:       true
+  compress:           true
+  inflight:           true
+  buffering:          true
+  rate_limit:         true
+  error_pages:        true
+  cloudflare_ipallow: false       # restrict origin to Cloudflare edge + LAN (can lock out)
+
+# ── Backend service URLs (use YOUR service names) ─────────────────────────────
+urls:
+  authentik:   "http://authentik_server:9000"
+  crowdsec:    "http://crowdsec_bouncer:8080"
+  sablier:     "http://sablier:10000"
+  error_pages: "http://error-pages:8080"
+
+# ── Security headers (rendered into https-header) ─────────────────────────────
+headers:
+  x_frame_options:           "SAMEORIGIN"
+  content_type_nosniff:      true
+  xss_protection:            "1; mode=block"
+  referrer_policy:           "strict-origin-when-cross-origin"
+  hsts:                      "max-age=31536000; includeSubDomains; preload"
+  hide_server:               true
+  robots:                    "noindex, nofollow"
+  permissions_policy_enabled: true
+  permissions_policy:        "camera=(), microphone=(), geolocation=(), payment=()"
+  csp_enabled:               true
+  csp:                       "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: wss:; frame-ancestors 'self'"
+
+# ── Authentik forwardAuth response headers ────────────────────────────────────
+authentik_response_headers:
+  - X-authentik-username
+  - X-authentik-groups
+  - X-authentik-email
+  - X-authentik-name
+  - X-authentik-uid
+  - X-authentik-jwt
+  - X-authentik-meta-jwks
+  - X-authentik-meta-outpost
+  - X-authentik-meta-provider
+  - X-authentik-meta-app
+  - X-authentik-meta-version
+
+# ── Middleware tunables ───────────────────────────────────────────────────────
+tunables:
+  global_retry: { attempts: 3, initial_interval: "100ms" }
+  compress:     { min_bytes: 1024, encodings: [zstd, br, gzip], excluded_content_types: [text/event-stream] }
+  inflight:     { amount: 100, ip_depth: 1 }
+  buffering:    { max_request: 10485760, mem_request: 2097152, max_response: 10485760, mem_response: 2097152,
+                 retry_expression: "IsNetworkError() && Attempts() < 3" }
+  rate_limit:   { average: 100, burst: 200, period: "1s", ip_depth: 1 }
+
+# ── serversTransports ─────────────────────────────────────────────────────────
+transports:
+  insecure_skip_verify: true
+  h2c:            true
+  custom_timeout: true
+
+# ── Sablier (sleep/wake) ──────────────────────────────────────────────────────
+sablier:
+  default_theme:    "ghost"
+  default_duration: "1h"
+  default_timeout:  "10m"
+  # Per-service overrides for multi-container groups / custom theme/timeout.
+  # Key = the traefik service name.
+  overrides: {}
+  #   my-app:
+  #     names:    "app_server,app_worker"
+  #     display:  "My App"
+  #     theme:    "retro"
+  #     duration: "30m"
+  #     timeout:  "2m"
+
+# ── TCP databases → dedicated entrypoints ─────────────────────────────────────
+#   Each DB gets its OWN entrypoint/port (NEVER on :80/web — that resets all
+#   HTTP). type derived from backend port/image; instance from service name.
+tcp:
+  enabled:              true
+  generate_entrypoints: true      # emit Traefik entrypoint defs for every DB
+  merge_into_traefik:   true      # on generate: append missing entrypoints to Traefik (append-only)
+  port_types:                     # canonical internal port -> type
+    5432: postgres
+    3306: mysql
+    6379: redis
+    27017: mongodb
+    7687: neo4j
+    5672: amqp
+    5984: couchdb
+    8086: influxdb
+    9000: clickhouse
+    9200: opensearch
+  image_types:                    # image substring -> [internal_port, type] (alias images)
+    pgvector:           [5432, postgres]
+    timescale:          [5432, postgres]
+    postgres:           [5432, postgres]
+    mariadb:            [3306, mysql]
+    percona:            [3306, mysql]
+    mysql:              [3306, mysql]
+    mongo:              [27017, mongodb]
+    rabbitmq:           [5672, amqp]
+    valkey:             [6379, redis]
+    keydb:              [6379, redis]
+    dragonfly:          [6379, redis]
+    redis:              [6379, redis]
+    neo4j:              [7687, neo4j]
+    couchdb:            [5984, couchdb]
+    influxdb:           [8086, influxdb]
+    clickhouse:         [9000, clickhouse]
+    opensearch:         [9200, opensearch]
+    elasticsearch:      [9200, opensearch]
+  image_exclude:                  # contain a db word but are NOT a database (vetoed)
+    - postgrest
+    - postgres-meta
+    - "-exporter"
+    - "_exporter"
+    - zabbix-server
+    - zabbix-web
+    - adminer
+    - pgadmin
+    - phpmyadmin
+    - mongo-express
+    - redis-commander
+  base_ports:                     # first port to hand out per type for NEW entrypoints
+    postgres:   5432
+    mysql:      3306
+    redis:      6379
+    mongodb:    27017
+    neo4j:      7687
+    amqp:       5672
+    couchdb:    5984
+    influxdb:   8086
+    clickhouse: 9000
+    opensearch: 9200
+  fallback_suffix: general        # entrypoint when an instance has no dedicated one
+
+# ── Explicit subdomain overrides (service|container -> subdomain) ──────────────
+#   Only needed when the subdomain isn't in the compose Host label and differs
+#   from the service name. Wins over everything.
+host_overrides: {}
+#   my-search-service: search
+
+# ── Stacks that live here but run on a REMOTE host (skip their dynamics) ──────
+exclude_suffixes: ["-ext"]
