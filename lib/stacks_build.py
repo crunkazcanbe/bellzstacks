@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-stacks_build.py — Interactive service scaffolder for StacksServer
+stacks_build.py — Interactive service scaffolder for Stacks
 Clean self-contained UI with loading bar and inline questions
 """
 import sys, os, re, json, subprocess, shutil, random, time, signal
 signal.signal(signal.SIGWINCH, signal.SIG_IGN)
 
 STACKS_DIR = "/srv/stacks/Stacks"
-CONF_DIR   = "~/.config/stacks"
+CONF_DIR   = "/home/user/.config/stacks"
 BUILD_CONF = os.path.join(CONF_DIR, "build.conf")
 
 # ── UI — exactly 9 lines, never changes ───────────────────────────────────────
@@ -301,7 +301,7 @@ def build_svc(name, image, ip, port, cfg, svc_num, db=None, redis=None):
         rip=redis.get('ip','127.0.0.1'); rpt=redis.get('port','6379')
         env.append(f'      - "REDIS_URL=redis://{rip}:{rpt}/0"')
     env_b = ("    environment:\n" + "\n".join(env) + "\n") if env else ""
-    vols  = [f'      - "/home/user/docker/{name}:/data"']
+    vols  = [f'      - "/srv/stacks/docker/{name}:/data"']
     for v in cfg.get("extra_volumes",[]): vols.append(f'      - "{v}"')
     sg     = cfg.get("sablier_group","") or name.replace("-","").replace("_","")
     labels = ['      - "traefik.enable=true"',
@@ -316,6 +316,7 @@ def build_svc(name, image, ip, port, cfg, svc_num, db=None, redis=None):
     log   = "" if use_caps else ("    logging: {driver: json-file, options: {max-size: 50m, max-file: '5'}}\n" if cfg.get("logging") else "")
     dns   = "\n".join(f'      - "{d}"' for d in cfg.get("dns",["192.168.1.114","8.8.8.8"]))
     num   = str(svc_num).zfill(2)
+    hc    = probe_healthcheck(image, port)
     return f"""
   # ---------------------------------------------------------
   # {num}. {name.upper()} 🐳
@@ -334,13 +335,45 @@ def build_svc(name, image, ip, port, cfg, svc_num, db=None, redis=None):
 {chr(10).join('  '+v for v in vols)}
     labels:
 {chr(10).join('  '+l for l in labels)}
-{"    dns:\n" + dns + "\n" if not use_caps else ""}    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080 || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 30s
-{blkio}{ulim}{dep}{log}"""
+{"    dns:\n" + dns + "\n" if not use_caps else ""}{hc}{blkio}{ulim}{dep}{log}"""
+
+def probe_healthcheck(image, port):
+    """Inspect the IMAGE and pick a healthcheck that actually fits what's inside.
+    - no /bin/sh (distroless) -> emit NO healthcheck (a check that can never pass
+      is worse than none)
+    - prefer nc (protocol-agnostic port-open) -> wget -> curl, against the
+      service's REAL port (not a hardcoded one)
+    Returns the YAML healthcheck block, or '' to omit it."""
+    probe = ("command -v nc   >/dev/null 2>&1 && echo HAS_nc; "
+             "command -v wget >/dev/null 2>&1 && echo HAS_wget; "
+             "command -v curl >/dev/null 2>&1 && echo HAS_curl; echo SHELLOK")
+    out = ""
+    try:
+        r = subprocess.run(
+            ["docker", "run", "--rm", "--network", "none", "--entrypoint", "sh",
+             str(image), "-c", probe],
+            capture_output=True, text=True, timeout=40,
+            env={**os.environ,
+                 "DOCKER_HOST": os.environ.get("DOCKER_HOST", "unix:///var/run/docker.sock")})
+        out = r.stdout + r.stderr
+    except Exception:
+        out = ""
+    if "SHELLOK" not in out:
+        return ""                                    # distroless / no shell
+    if "HAS_nc" in out:
+        test = f"nc -z 127.0.0.1 {port} || exit 1"
+    elif "HAS_wget" in out:
+        test = f"wget -qO- http://127.0.0.1:{port}/ || exit 1"
+    elif "HAS_curl" in out:
+        test = f"curl -sf http://127.0.0.1:{port}/ || exit 1"
+    else:
+        return ""                                    # shell but no probe tool
+    return ('    healthcheck:\n'
+            f'      test: ["CMD-SHELL", "{test}"]\n'
+            '      interval: 10s\n'
+            '      timeout: 5s\n'
+            '      retries: 10\n'
+            '      start_period: 30s\n')
 
 def build_db_block(db, svc_name):
     dt,name,ip,port = db['type'],db['name'],db['ip'],db['port']
@@ -401,9 +434,9 @@ def inject(stack, block, network, volume=None):
         content = re.sub(r"^(volumes:\n)",
                         f"\\1  {volume}: {{name: {volume}, external: true}}\n",
                         content,count=1,flags=re.MULTILINE)
-    if "##STACKS_ART_START_FOOTER" in content:
-        content = content.replace("##STACKS_ART_START_FOOTER",
-                                  block.rstrip()+"\n\n##STACKS_ART_START_FOOTER",1)
+    if "##STACKSART_START_FOOTER" in content:
+        content = content.replace("##STACKSART_START_FOOTER",
+                                  block.rstrip()+"\n\n##STACKSART_START_FOOTER",1)
     else:
         # Find last top-level # line (footer art) and insert before it
         lines = content.splitlines(keepends=True)

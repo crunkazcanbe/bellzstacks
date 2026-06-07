@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 import os, re
 STACKS_DIR = "/srv/stacks/Stacks"
-OUT = "~/.config/stacks/all_services.txt"
-lines = ["# ALL SERVICES — StacksServer\n# Format: stack | service | image\n# =========================================\n\n"]
+OUT = "/home/user/.config/stacks/all_services.txt"
+lines = ["# ALL SERVICES — Stacks\n# Format: stack | service | image\n# =========================================\n\n"]
 stacks = sorted([f for f in os.listdir(STACKS_DIR) if f.endswith('.yml')])
 total = 0
 for yml in stacks:

@@ -245,6 +245,12 @@ def pull_updates():
         print("No updates to pull.")
         return
     print(f"Pulling {len(targets)} image(s)...\n")
+    # record outgoing versions before they're overwritten (for rollback)
+    try:
+        import stacks_image_history as _ih
+        if _ih.enabled(): _ih.record_from_docker_images()
+    except Exception:
+        _ih = None
     for r in targets:
         img = r.get("image", "")
         print(f"⬇ docker pull {img}")
@@ -252,6 +258,11 @@ def pull_updates():
             subprocess.run(["docker", "pull", img], timeout=600)
         except Exception as e:
             print(f"  pull failed: {e}")
+    # record the freshly-pulled versions too
+    try:
+        if _ih and _ih.enabled(): _ih.record_from_docker_images()
+    except Exception:
+        pass
     print("\nRe-checking digests to update history...")
     check_updates(force=True)
 

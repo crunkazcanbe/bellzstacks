@@ -22,7 +22,7 @@ def get_default_desc():
             if l.startswith("BUILD_DEFAULT_DESC="):
                 return l.split("=",1)[1].strip('" ')
     except: pass
-    return "A powerful service running on StacksServer. Edit this description."
+    return "A powerful service running on Stacks. Edit this description."
 
 def parse_stack(fpath):
     """Get all services and images from a compose file."""
@@ -110,7 +110,7 @@ def sync_descriptions(stack_name, services, default_desc):
 def sync_all_services(stack_name, services):
     """Update all_services.txt - add new, remove deleted."""
     try: existing = open(SVC_FILE).read()
-    except: existing = "# ALL SERVICES — StacksServer\n# Format: stack | service | image\n# =========================================\n"
+    except: existing = "# ALL SERVICES — Stacks\n# Format: stack | service | image\n# =========================================\n"
 
     valid_names = {svc for svc, img in services}
     section = f"# ── {stack_name.upper()}"

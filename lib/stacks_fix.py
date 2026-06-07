@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-stacks_fix.py — Automated compose file fixer for StacksServer
+stacks_fix.py — Automated compose file fixer for Stacks
 
 Fixes:
   1. Auto-defines missing networks/volumes into the smallest "creator" file
@@ -22,7 +22,7 @@ Usage:
   stacks_fix.py <stackname> <servicename>
   stacks_fix.py all --dry-run        # show what would change, write nothing
 
-Config (optional): ~/.config/stacks/stacks.conf
+Config (optional): /home/user/.config/stacks/stacks.conf
   FIX_HEALTHCHECKS=1        # 0 disables all healthcheck injection
   FIX_DEFINE_NETVOL=1       # 0 disables network/volume auto-define
   FIX_HEAL_TYPOS=1          # 0 disables creator-file typo healing
@@ -33,8 +33,8 @@ Config (optional): ~/.config/stacks/stacks.conf
 import sys, os, re, subprocess, json, shutil, time
 
 STACKS_DIR = "/srv/stacks/Stacks"
-CONF_PATH  = "~/.config/stacks/stacks.conf"
-BACKUP_DIR = "/srv/stacks/backups"
+CONF_PATH  = "/home/user/.config/stacks/stacks.conf"
+BACKUP_DIR = "/srv/stacks/Backup"
 
 def _backup(p):
     try:
@@ -72,7 +72,7 @@ def load_conf():
         "FIX_AUTO_LINK_NETWORKS": "0",
         "FIX_AUTHORITATIVE_NETWORKS": "1",  # 1=wipe+set exact nets (removes junk); 0=additive
         "FIX_NORMALIZE_DOMAINS": "0",  # 1=set hostname=<name>, domainname=<name>.<DOMAIN> for every container
-        "FIX_DOMAIN_BLACKLIST": "",    # comma-list of domains to NEVER normalize (e.g. example.org for netbird)
+        "FIX_DOMAIN_BLACKLIST": "",    # comma-list of domains to NEVER normalize (e.g. example.online for netbird)
         "FIX_FORCE_VOLUME_BASE": "0",  # 1=force ALL /home/*/docker/ bind paths to FIX_VOLUME_BASE (normalize). DEFAULT OFF
         "FIX_AUTO_NAME_CONTAINERS": "0",  # 1=rename containers (loner=oneword, family=root_role) + update all refs. DEFAULT OFF for others
         "FIX_SYNC_DYNAMICS_NAMES": "0",  # 1=also apply rename to Traefik dynamic configs (keeps routing in sync). DEFAULT OFF
@@ -1485,7 +1485,45 @@ def heal_creator_typos(path, dry_run):
     return 0
 
 # ── Healthcheck pass on one file ───────────────────────────────────────────────
-def fix_healthchecks(path, cfg, target_svc, dry_run, replace_broken=False):
+def _hc_ensure_up(name, wait=15):
+    """force-HC only: make sure the container is running before we probe it,
+    so the scan sees the real tools/ports (not an asleep fallback)."""
+    import time
+    try:
+        st = subprocess.run(["docker","inspect",name,"--format","{{.State.Status}}"],
+                            capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return False
+    if st == "running":
+        return True
+    if not st:
+        return False                      # not created -> nothing to start/probe
+    subprocess.run(["docker","start",name], capture_output=True, timeout=40)
+    for _ in range(wait):
+        time.sleep(1)
+        try:
+            st = subprocess.run(["docker","inspect",name,"--format","{{.State.Status}}"],
+                                capture_output=True, text=True, timeout=5).stdout.strip()
+        except Exception:
+            st = ""
+        if st == "running":
+            time.sleep(3)                 # let it bind its ports before we scan
+            return True
+    return False
+
+def _hc_recreate(stack_file, svc, stacks_dir):
+    """force-HC only: recreate ONE service so the freshly-written healthcheck applies."""
+    stack = os.path.basename(stack_file).rsplit('.', 1)[0]
+    try:
+        subprocess.run(["docker","compose","-p",stack,"--project-directory",stacks_dir,
+                        "-f",stack_file,"up","-d","--force-recreate","--no-deps",svc],
+                       capture_output=True, timeout=180,
+                       env={**os.environ,
+                            "DOCKER_HOST": os.environ.get("DOCKER_HOST","unix:///var/run/docker.sock")})
+    except Exception:
+        pass
+
+def fix_healthchecks(path, cfg, target_svc, dry_run, replace_broken=False, force_hc=False):
     deep = on(cfg["FIX_DEEP_INSPECT"])
     skip = set(cfg["FIX_HC_SKIP"].split())
     services, lines = parse_services_with_positions(path)
@@ -1493,6 +1531,7 @@ def fix_healthchecks(path, cfg, target_svc, dry_run, replace_broken=False):
         services = [s for s in services if s['name'] == target_svc]
 
     changes = 0
+    _recreate = []
     for svc in reversed(services):  # reverse keeps line numbers valid
         if not svc['image']:
             continue
@@ -1503,10 +1542,12 @@ def fix_healthchecks(path, cfg, target_svc, dry_run, replace_broken=False):
         if svc['name'] in skip:
             pr(f"  {C}  {svc['name']}: in skip-list, leaving alone{X}")
             continue
+        if force_hc and not dry_run and svc['name']:
+            _hc_ensure_up(svc['name'])      # bring it up so the probe sees the real thing
         if svc['has_healthcheck']:
             # Check if we should replace actively-failing healthchecks
             _replaced = False
-            if replace_broken and svc['name']:
+            if (replace_broken or force_hc) and svc['name']:
                 try:
                     _ri = subprocess.run(
                         ["docker", "inspect", svc['name'], "--format",
@@ -1515,22 +1556,23 @@ def fix_healthchecks(path, cfg, target_svc, dry_run, replace_broken=False):
                     _parts = (_ri.stdout.strip() or "|0").split("|")
                     _hc_status = _parts[0] if _parts else ""
                     _failing = int(_parts[1] if len(_parts) > 1 else "0")
-                    if _hc_status == "unhealthy" or _failing > 0:
+                    if force_hc or _hc_status == "unhealthy" or _failing > 0:
                         _new_hc = hc_from_inspect(svc['name'], svc.get('image', ''))
                         if not _new_hc:
                             _new_hc = hc_from_pattern(svc.get('image', ''), svc.get('ports', []))
                         if _new_hc:
                             if dry_run:
-                                pr(f"  {Y}  [dry-run] BROKEN HC on {svc['name']} (failing:{_failing}) → {_new_hc[5]}{X}")
+                                pr(f"  {Y}  [dry-run] re-stamp HC: {svc['name']} (failing:{_failing}) → {_new_hc[5]}{X}")
                                 changes += 1
                                 _replaced = True
                             else:
                                 _lines2, _changed = replace_hc_in_service(lines, svc, _new_hc)
                                 if _changed:
                                     lines = _lines2
-                                    pr(f"  {G}  ✔ {svc['name']}: broken HC replaced → {_new_hc[5]}{X}")
+                                    pr(f"  {G}  ✔ {svc['name']}: HC re-stamped → {_new_hc[5]}{X}")
                                     changes += 1
                                     _replaced = True
+                                    _recreate.append(svc['name'])
                 except Exception as _e:
                     pass
             if not _replaced:
@@ -1544,10 +1586,17 @@ def fix_healthchecks(path, cfg, target_svc, dry_run, replace_broken=False):
         lines, source = inject_hc_into_service(lines, svc, deep)
         changes += 1
         pr(f"  {G}💉 {svc['name']}: healthcheck added ({source}){X}")
+        if force_hc:
+            _recreate.append(svc['name'])
 
     if changes > 0 and not dry_run:
         _backup(path)
         open(path, 'w').writelines(lines)
+    if force_hc and not dry_run and _recreate:
+        sd = cfg.get("STACKS_DIR") or os.path.dirname(path)
+        for _svc in _recreate:
+            pr(f"  {C}  ↻ recreating {_svc} to apply its new healthcheck...{X}")
+            _hc_recreate(path, _svc, sd)
     return changes
 
 # ── Main ────────────────────────────────────────────────────────────────────────
@@ -1750,7 +1799,7 @@ def create_volume_dirs(paths, dry_run=False):
 def normalize_host_domain(content, domain="example.com", blacklist_domains=None):
     """For every service with a container_name, set hostname: <name> and
     domainname: <name>.<domain>. Skip services whose current domainname ends
-    in a blacklisted domain (configs hardcode it, e.g. netbird/example.org)."""
+    in a blacklisted domain (configs hardcode it, e.g. netbird/example.online)."""
     if blacklist_domains is None: blacklist_domains = []
     lines = content.split('\n')
     out = list(lines); n = 0; N = len(lines)
@@ -3019,6 +3068,7 @@ def main():
     dry_run = '--dry-run' in sys.argv[1:]
     cfg = load_conf()
     replace_broken = '--replace-broken' in sys.argv[1:] or on(cfg.get('FIX_REPLACE_BROKEN_HC', '0'))
+    force_hc = '--force-hc' in sys.argv[1:] or on(cfg.get('FIX_FORCE_HC', '0'))
     sd = cfg["STACKS_DIR"]
 
     target = args[0] if args else 'all'
@@ -3034,7 +3084,7 @@ def main():
 
 
     pr(f"\n{M}╔══════════════════════════════════════╗{X}")
-    pr(f"{M}║   🔧 STACKS STACK FIXER               ║{X}")
+    pr(f"{M}║   🔧 STACKS FIXER                    ║{X}")
     pr(f"{M}╚══════════════════════════════════════╝{X}")
     if dry_run:
         pr(f"{Y}   DRY RUN — no files will be written{X}")
@@ -3251,8 +3301,8 @@ def main():
             total += heal_creator_typos(path, dry_run)
 
     # ── Phase 3: healthchecks ──
-    if on(cfg["FIX_HEALTHCHECKS"]):
-        pr(f"\n{C}❤️  Healthchecks (add-only; existing ones never touched){X}")
+    if on(cfg["FIX_HEALTHCHECKS"]) or force_hc:
+        pr(f"\n{C}❤️  Healthchecks ({'FORCE: re-stamping ALL via probe' if force_hc else 'add-only; existing ones never touched'}){X}")
         if target in ('all', '--all'):
             files = sorted(os.path.join(sd, f) for f in os.listdir(sd)
                            if f.endswith('.yml') or f.endswith('.yaml'))
@@ -3265,7 +3315,7 @@ def main():
         for f in files:
             stack_name = os.path.basename(f).replace('.yml', '').replace('.yaml', '')
             pr(f"\n{C}🔧 {stack_name}{X}")
-            total += fix_healthchecks(f, cfg, svc, dry_run, replace_broken)
+            total += fix_healthchecks(f, cfg, svc, dry_run, replace_broken, force_hc)
 
     # ── Phase 3.4: Container name normalization ─────────────────────────────
     # Replaces . and _ with - in container_name, hostname, domainname

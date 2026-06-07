@@ -3,8 +3,8 @@ import sys, os, re
 
 action     = sys.argv[1] # inject or strip
 target     = sys.argv[2] # all or specific file path
-conf_path  = "~/.config/stacks/art.conf"
-url_conf   = "~/.config/stacks/stack_urls.conf"
+conf_path  = "/home/user/.config/stacks/art.conf"
+url_conf   = "/home/user/.config/stacks/stack_urls.conf"
 mode       = sys.argv[3] if len(sys.argv) > 3 else "all"  # art, urls, or all
 stacks_dir = "/srv/stacks/Stacks"
 
@@ -25,8 +25,8 @@ if os.path.exists(conf_path):
         ('_ba_volumes',  'volumes'),
         ('_ba_services', 'services'),
     ]:
-        start_marker = f"##STACKS_ART_START_{key.upper()}"
-        end_marker = f"##STACKS_ART_END_{key.upper()}"
+        start_marker = f"##STACKSART_START_{key.upper()}"
+        end_marker = f"##STACKSART_END_{key.upper()}"
         if start_marker in conf_content and end_marker in conf_content:
             art[key] = conf_content.split(start_marker)[1].split(end_marker)[0].strip('\n')
 
@@ -69,8 +69,8 @@ def strip_file(path):
     out = []
     skip = False
     for l in lines:
-        if '##STACKS_ART_START' in l: skip = True; continue
-        if '##STACKS_ART_END' in l: skip = False; continue
+        if '##STACKSART_START' in l: skip = True; continue
+        if '##STACKSART_END' in l: skip = False; continue
         if not skip: out.append(l)
     # Also remove large comment blocks (art/URLs = 3+ consecutive # lines)
     cleaned = []

@@ -4,7 +4,7 @@ import sys, os, re
 action   = sys.argv[1]  # inject or strip
 target   = sys.argv[2]  # all or specific file
 dyn_dir  = sys.argv[3] if len(sys.argv) > 3 else "/srv/stacks/Configs/Dynamics"
-conf_path = "~/.config/stacks/art.conf"
+conf_path = "/home/user/.config/stacks/art.conf"
 
 # Load art from art.conf
 header_art = ""
@@ -12,8 +12,8 @@ footer_art = ""
 if os.path.exists(conf_path):
     conf = open(conf_path).read()
     for var, key in [("_ba_header", "header"), ("_ba_footer", "footer")]:
-        sm = f"##STACKS_ART_START_{key.upper()}"
-        em = f"##STACKS_ART_END_{key.upper()}"
+        sm = f"##STACKSART_START_{key.upper()}"
+        em = f"##STACKSART_END_{key.upper()}"
         if sm in conf and em in conf:
             if key == "header":
                 header_art = conf.split(sm)[1].split(em)[0].strip("\n")

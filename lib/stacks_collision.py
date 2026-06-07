@@ -335,61 +335,152 @@ def get_image_default_port(image):
     except: return []
 
 # ── Scanning ──────────────────────────────────────────────────────────────────
+# NOTE: the old scanner grabbed a flat 2000-CHAR window after each container_name
+# and matched every ip:port:port in it — that window bled into the NEXT services,
+# so every container got blamed for its neighbours' ports (hundreds of phantom
+# collisions). We now parse each service's real `ports:` block (YAML-aware).
+try:
+    import yaml as _yaml
+except Exception:
+    _yaml = None
+
+
+def _parse_port_entry(entry):
+    """A compose ports entry → (host_ip, host_port) or None.
+    Handles 'ip:host:cont', 'host:cont', 'cont', '.../tcp', and the dict form."""
+    if isinstance(entry, dict):
+        pub = entry.get("published")
+        if pub is None:
+            return None
+        return (str(entry.get("host_ip") or "") or None, str(pub).split("-")[0])
+    s = str(entry).strip().strip('"\'').split("/")[0]   # drop /tcp,/udp
+    parts = s.split(":")
+    if len(parts) == 3:           # ip:host:container
+        return (parts[0], parts[1])
+    if len(parts) == 2:           # host:container (no specific ip)
+        return (None, parts[0])
+    return None                   # bare container port → not host-published
+
+
+def _iter_services(fpath):
+    """Yield (container_name, ports_list) per service. YAML first, regex fallback."""
+    if _yaml:
+        try:
+            data = _yaml.safe_load(open(fpath, encoding="utf-8", errors="replace"))
+            if isinstance(data, dict) and isinstance(data.get("services"), dict):
+                for svc, body in data["services"].items():
+                    body = body if isinstance(body, dict) else {}
+                    ports = body.get("ports") or []
+                    if not isinstance(ports, list):
+                        ports = [ports]
+                    yield str(body.get("container_name") or svc), ports
+                return
+        except Exception:
+            pass
+    # Fallback: indentation-aware (only if YAML parse fails) — bounded per service
+    cur, cname, ports, in_ports = None, None, [], False
+    in_services = False
+    for raw in open(fpath, encoding="utf-8", errors="replace"):
+        line = raw.rstrip("\n")
+        if re.match(r'^services:\s*$', line):
+            in_services = True; continue
+        if in_services and re.match(r'^\S', line):
+            in_services = False
+        if not in_services:
+            continue
+        m = re.match(r'^  ([A-Za-z0-9._-]+):\s*$', line)
+        if m:
+            if cur is not None:
+                yield (cname or cur), ports
+            cur, cname, ports, in_ports = m.group(1), None, [], False
+            continue
+        if cur is None:
+            continue
+        mc = re.match(r'^\s+container_name:\s*([^\s#]+)', line)
+        if mc:
+            cname = mc.group(1).strip('"\''); continue
+        if re.match(r'^    ports:\s*$', line):
+            in_ports = True; continue
+        if in_ports:
+            mp = re.match(r'^\s*-\s*(.+)$', line)
+            if mp:
+                ports.append(mp.group(1).strip())
+            elif re.match(r'^    \S', line):   # next 4-space key → ports block ended
+                in_ports = False
+    if cur is not None:
+        yield (cname or cur), ports
+
+
+def _host_bindings(fpath):
+    """Yield (cname, ip, port) for each LAN (192.168.x) host-published port."""
+    for cname, ports in _iter_services(fpath):
+        for entry in ports:
+            pp = _parse_port_entry(entry)
+            if not pp:
+                continue
+            ip, port = pp
+            if ip and ip.startswith("192.168.") and port and port.isdigit():
+                yield cname, ip, port
+
+
 def scan_all_ips():
     """Return {ip: [(stack, container)]} for all stacks."""
     ip_map = {}
     for fpath in sorted(glob.glob(f"{STACKS_DIR}/*.yml")):
-        stack = os.path.basename(fpath).replace(".yml","")
+        stack = os.path.basename(fpath).replace(".yml", "")
         try:
-            content = open(fpath).read()
-            # Match ports like "192.168.1.x:port:port"
-            for m in re.finditer(r'container_name:\s*(\S+)', content):
-                cname = m.group(1)
-                # Find IPs near this container
-                block_start = m.start()
-                # Get next 50 lines
-                block = content[block_start:block_start+2000]
-                for ip_m in re.finditer(r'(192\.168\.1\.\d+):\d+:\d+', block):
-                    ip = ip_m.group(1)
-                    if ip not in ip_map: ip_map[ip] = []
-                    entry = (stack, cname)
-                    if entry not in ip_map[ip]:
-                        ip_map[ip].append(entry)
-        except: pass
+            for cname, ip, _port in _host_bindings(fpath):
+                ip_map.setdefault(ip, [])
+                e = (stack, cname)
+                if e not in ip_map[ip]:
+                    ip_map[ip].append(e)
+        except Exception:
+            pass
     return ip_map
 
+
 def scan_all_ports():
-    """Return {host_port: [(stack, container, ip)]} for all stacks."""
+    """Return {'ip:port': [(stack, container)]} for all stacks."""
     port_map = {}
     for fpath in sorted(glob.glob(f"{STACKS_DIR}/*.yml")):
-        stack = os.path.basename(fpath).replace(".yml","")
+        stack = os.path.basename(fpath).replace(".yml", "")
         try:
-            content = open(fpath).read()
-            for m in re.finditer(r'container_name:\s*(\S+)', content):
-                cname = m.group(1)
-                block_start = m.start()
-                block = content[block_start:block_start+2000]
-                for port_m in re.finditer(r'(192\.168\.1\.\d+):(\d+):\d+', block):
-                    ip = port_m.group(1)
-                    port = port_m.group(2)
-                    key = f"{ip}:{port}"
-                    if key not in port_map: port_map[key] = []
-                    entry = (stack, cname)
-                    if entry not in port_map[key]:
-                        port_map[key].append(entry)
-        except: pass
+            for cname, ip, port in _host_bindings(fpath):
+                key = f"{ip}:{port}"
+                port_map.setdefault(key, [])
+                e = (stack, cname)
+                if e not in port_map[key]:
+                    port_map[key].append(e)
+        except Exception:
+            pass
     return port_map
+
+def _running_names():
+    """Set of container names that are currently RUNNING."""
+    try:
+        r = subprocess.run(["docker", "ps", "--format", "{{.Names}}"],
+                           capture_output=True, text=True, timeout=8)
+        return {n for n in r.stdout.split() if n}
+    except Exception:
+        return set()
+
 
 def get_collisions():
     """
     Scan all stacks for IP and port collisions.
     Returns (ip_collisions, port_collisions) lists of dicts.
+
+    Each port-collision dict also carries:
+      'running' : [container names among the owners that are running right now]
+      'active'  : True if ≥2 owners are running (a LIVE conflict) — vs a latent
+                  one that's only declared in the files (containers not all up).
     """
     cfg = load_conf()
     ip_map   = scan_all_ips()
     port_map = scan_all_ports()
     blacklist_ips   = set(x.strip() for x in cfg["IP_BLACKLIST"].split(",") if x.strip())
     blacklist_ports = set(x.strip() for x in cfg["PORT_BLACKLIST"].split(",") if x.strip())
+    running = _running_names()
 
     ip_collisions = []
     for ip, owners in ip_map.items():
@@ -400,12 +491,21 @@ def get_collisions():
     port_collisions = []
     for key, owners in port_map.items():
         ip, port = key.split(":", 1)
-        # Same IP:PORT used by multiple containers = real collision
+        run = [n for (_s, n) in owners if n in running]
+        # A LIVE collision = 2+ DIFFERENT containers on the same ip:port that are
+        # actually running right now. A blacklisted port used by a single (often
+        # locked/proxy) container is just a note, never a 'live' collision.
         if len(owners) > 1:
-            port_collisions.append({"ip": ip, "port": port, "owners": owners, "type": "duplicate"})
+            port_collisions.append({"ip": ip, "port": port, "owners": owners,
+                                    "type": "duplicate", "running": run,
+                                    "active": len(run) >= 2})
         elif port in blacklist_ports:
-            port_collisions.append({"ip": ip, "port": port, "owners": owners, "type": "blacklisted"})
+            port_collisions.append({"ip": ip, "port": port, "owners": owners,
+                                    "type": "blacklisted", "running": run,
+                                    "active": False})
 
+    # Sort active (live) collisions first so they surface at the top.
+    port_collisions.sort(key=lambda c: (not c.get("active"), c["ip"], c["port"]))
     return ip_collisions, port_collisions
 
 # ── Assignment ────────────────────────────────────────────────────────────────

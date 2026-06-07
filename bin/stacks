@@ -118,8 +118,16 @@ _register_config_options() {
   _stacks_config_option "SCALE_SKIP_CONTAINERS" ""   "Space-separated containers skipped by stacks scale on"
   _stacks_config_option "PROXY_SKIP_CONTAINERS" ""   "Space-separated containers skipped by stacks proxy on"
   _stacks_config_option "SCALE_AUTO_GROUP"     "1"   "Use stack prefix as sablier group name"
+  _stacks_config_option "SABLIER_RESTART_EVERY" "1"  "Restart Sablier on 'up': 1/stack=after each stack, N=every N stacks, 0/end=only at the very end"
+  _stacks_config_option "UP_PARALLEL"          "1"   "How many stacks to bring up at once on 'up' (1=sequential/off, 2/3/...=parallel)"
   _stacks_config_option "FIX_REPLACE_BROKEN_HC" "1"  "Replace actively-failing healthchecks"
+  _stacks_config_option "FIX_AUTO_SEARCH"      "1"   "On fix/up: when an image fails to pull, offer a registry search to find a replacement (interactive)"
+  _stacks_config_option "FIX_FORCE_HC"         "0"   "Force-override ALL healthchecks on 'fix' (remove existing, probe + apply the proper one to every service)"
+  _stacks_config_option "IMAGE_HISTORY_ENABLED" "1"  "Record image version history (for rollback) — snapshots digests over time"
+  _stacks_config_option "IMAGE_HISTORY_KEEP"   "10"  "How many past versions to keep per image (oldest pruned beyond this)"
+  _stacks_config_option "RECLAIM_PROTECT_STACK_IMAGES" "1" "Reclaim: protect images referenced by a stack compose file even when their container is down (Sablier-safe). 'reclaim clean --aggressive' overrides this for one run"
   _stacks_config_option "FIX_CONVERT_NAMED_TO_BIND" "1" "Convert named volumes to bind mounts"
+  _stacks_config_option "FIX_STRIP_VOLUMES"    "1" "After 'fix', delete now-unused top-level named-volume declarations (bind-mount cleanup)"
   _stacks_config_option "FIX_AUTO_DEPENDS_ON"  "1"   "Auto-add depends_on for linked services"
   _stacks_config_option "INJECT_STOP_GRACE"    "1"   "Inject stop_grace_period into anchor"
   _stacks_config_option "INJECT_LOGGING"       "1"   "Inject logging config into anchor"
@@ -348,7 +356,7 @@ CONTINUE_COUNT=-1
 
 for arg in "$@"; do
   # Catch the primary action command first
-  if [ -z "$COMMAND" ] && [[ "${arg,,}" =~ ^(up|down|start|stop|restart|rm|snapshot|get|kill|ls|status|logs|inspect|pull|build|volume|network|dynamics|reload|clean|search|regsearch|inject|strip|art|backup|describe|gen|fix|custom|scale|proxy|menu)$ ]]; then
+  if [ -z "$COMMAND" ] && [[ "${arg,,}" =~ ^(up|down|start|stop|restart|rm|snapshot|get|kill|ls|status|logs|inspect|pull|build|volume|network|dynamics|reload|clean|search|regsearch|inject|strip|art|backup|describe|gen|fix|custom|scale|proxy|menu|images|dedupe|volclean|reclaim)$ ]]; then
      COMMAND="${arg,,}"
      continue
   fi
@@ -483,7 +491,7 @@ if [ "$DO_ATTACH" -eq 1 ]; then
   fi
 fi
 
-if [ -n "$TARGET_STACK" ] && [ ! -f "$STACKS_DIR/$TARGET_STACK.yml" ] && [[ ! "$COMMAND" =~ ^(regsearch|get|kill|status|ls|clean|reload|search|build|pull|logs|inspect|volume|network|dynamics|inject|strip|art|backup|gen|fix|scale|proxy|menu)$ ]]; then
+if [ -n "$TARGET_STACK" ] && [ ! -f "$STACKS_DIR/$TARGET_STACK.yml" ] && [[ ! "$COMMAND" =~ ^(regsearch|get|kill|status|ls|clean|reload|search|build|pull|logs|inspect|volume|network|dynamics|inject|strip|art|backup|gen|fix|scale|proxy|menu|images|dedupe|volclean|reclaim)$ ]]; then
   printf "\e[?25h"
   echo -e "\e[1;31m✘ Error: Stack $TARGET_STACK.yml not found in $STACKS_DIR\e[0m"
   exit 1
@@ -588,6 +596,9 @@ update_ui() {
   if [ "$percent" -gt 100 ]; then percent=100; fi
   CURRENT_PERCENT=$percent
 
+  # Parallel worker: don't touch the shared terminal — drop a clean status line for the renderer.
+  if [ -n "${_PAR_LOG:-}" ]; then printf '%s|%s|%s\n' "$CURRENT_STACK" "$1" "$percent" > "$_PAR_LOG" 2>/dev/null; return 0; fi
+
   local cols=80
   local bar_width=36
   local filled=$(( (percent * bar_width) / 100 ))
@@ -611,6 +622,7 @@ update_ui() {
 }
 
 safe_echo() {
+  if [ -n "${_PAR_LOG:-}" ]; then printf '%s|%s|%s\n' "$CURRENT_STACK" "$1" "${CURRENT_PERCENT:-0}" > "$_PAR_LOG" 2>/dev/null; return 0; fi
   clear_ui
   echo -e "$1"
   init_ui
@@ -1245,6 +1257,17 @@ PYEOF
     fi
   fi
 
+  # volume-mode sync for this stack (config-driven): bind→strip / named→add-back
+  if [ "$DO_FIX" -eq 1 ]; then
+    if [ "${FIX_CONVERT_NAMED_TO_BIND:-1}" = "1" ]; then
+      _vc=$(STACKS_DIR="$STACKS_DIR" python3 /usr/local/lib/stacks_volclean.py clean --auto "$stack" 2>/dev/null | grep -oE "stripped [0-9]+" | head -1)
+      [ -n "$_vc" ] && update_ui "🧹 $stack › $_vc unused volume decl(s)" "$p2"
+    elif [ "${FIX_CONVERT_NAMED_TO_BIND}" = "0" ]; then
+      _vc=$(STACKS_DIR="$STACKS_DIR" python3 /usr/local/lib/stacks_volclean.py ensure "$stack" 2>/dev/null | grep -oE "added [0-9]+" | head -1)
+      [ -n "$_vc" ] && update_ui "📦 $stack › $_vc volume decl(s) added" "$p2"
+    fi
+  fi
+
   if [ "$DO_REPAIR" -eq 1 ] && [ -f /usr/local/lib/stacks_repair.py ]; then
     update_ui "🔧 Repairing $stack (structural)..." "$p2"
     _rep=$(python3 -c "import sys; sys.path.insert(0,'/usr/local/lib'); import stacks_repair as R; a=R.repair_file('$STACKS_DIR/$stack.yml'); b=R.repair_loop('$STACKS_DIR/$stack.yml'); print(len(a)+len(b)); [print('  '+x) for x in (a+b)]" 2>&1)
@@ -1507,6 +1530,63 @@ post_deploy_checks() {
   printf "\e[?25h"
   if [[ "${key,,}" == "l" ]]; then less -R "$LOG_FILE"; fi
   exit 0
+}
+
+_run_parallel_up() {
+  # Parallel bring-up: run UP_PARALLEL stacks at once, rotating their live logs
+  # onto the single status line. Each worker writes a clean status line to its
+  # own file (via update_ui's _PAR_LOG early-return); this renderer reads them.
+  local n="${UP_PARALLEL:-1}"
+  local total=${#STACKS[@]}
+  local pdir; pdir=$(mktemp -d 2>/dev/null || echo "/tmp/stacks-par-$$"); mkdir -p "$pdir"
+  local done_n=0 idx=0 _sab_count=0
+  while [ "$idx" -lt "$total" ]; do
+    local pids=() names=() b
+    for ((b=0; b<n && idx<total; b++, idx++)); do
+      local st="${STACKS[$idx]}"
+      printf '%s|starting...|0\n' "$st" > "$pdir/$st.line"
+      ( _PAR_LOG="$pdir/$st.line" deploy_stack "$st" "$DO_RECREATE" 0 ) >>"$LOG_FILE" 2>&1 &
+      pids+=("$!"); names+=("$st")
+    done
+    # rotate through the live workers until the whole batch is done
+    while :; do
+      local alive=0 i la
+      for i in "${!pids[@]}"; do
+        if kill -0 "${pids[$i]}" 2>/dev/null; then
+          alive=1
+          IFS='|' read -r _ la _ < "$pdir/${names[$i]}.line" 2>/dev/null
+          CURRENT_STACK="${names[$i]}"; CURRENT_SERVICE="parallel x$n"
+          update_ui "${la:0:46}" "$(( done_n * 100 / total ))"
+          sleep 0.35
+        fi
+      done
+      [ "$alive" -eq 0 ] && break
+    done
+    for i in "${!pids[@]}"; do wait "${pids[$i]}" 2>/dev/null; done
+    done_n=$(( done_n + ${#pids[@]} )); _sab_count=$(( _sab_count + ${#pids[@]} ))
+    # Sablier cadence after each batch (same semantics as sequential)
+    local every="${SABLIER_RESTART_EVERY:-1}" now=0
+    case "$every" in
+      end|0|off|never|no) now=0 ;;
+      stack|whole|1)      now=1 ;;
+      *) if [[ "$every" =~ ^[0-9]+$ ]] && [ "$_sab_count" -ge "$every" ]; then now=1; _sab_count=0; fi ;;
+    esac
+    if [ "$now" -eq 1 ]; then
+      echo "  -> Restarting sablier (cadence=$every)..." | log_output
+      command docker restart sablier >/dev/null 2>&1 || true
+      local w=0
+      while [ "$w" -lt 24 ]; do
+        [ "$(command docker inspect sablier --format='{{.State.Health.Status}}' 2>/dev/null || echo none)" = "healthy" ] && break
+        sleep 5; w=$((w+1))
+      done
+    fi
+    smart_wait "$DELAY"
+  done
+  case "${SABLIER_RESTART_EVERY:-1}" in
+    stack|whole|1) : ;;
+    *) command docker restart sablier >/dev/null 2>&1 || true ;;
+  esac
+  rm -rf "$pdir" 2>/dev/null || true
 }
 
 finish_action_sequence() {
@@ -1776,9 +1856,11 @@ if [ "$COMMAND" == "up" ]; then
     pct_per_stack=0
     if [ "$total_stacks" -gt 0 ]; then pct_per_stack=$(( 100 / total_stacks )); fi
     
+    if [ "${UP_PARALLEL:-1}" -gt 1 ] 2>/dev/null; then _run_parallel_up; else
+    _sab_count=0
     for stack in "${STACKS[@]}"; do
       deploy_stack "$stack" "$DO_RECREATE" "$pct_per_stack"
-      # Keep critical services alive after every stack
+      # Keep critical services alive after every stack (repair mode only)
       if [ "$DO_REPAIR" -eq 1 ]; then
         for crit in traefik sablier cloudflared_tunnel_core authentik-server; do
           STATUS=$(command docker inspect --format='{{.State.Status}}' "$crit" 2>/dev/null)
@@ -1787,8 +1869,19 @@ if [ "$COMMAND" == "up" ]; then
             command docker restart "$crit" >/dev/null 2>&1 || true
           fi
         done
-        # Restart Sablier so it registers new containers and puts them to sleep
-        echo "  -> Restarting sablier to register and sleep new containers..." | log_output
+      fi
+      # ── Sablier restart cadence (SABLIER_RESTART_EVERY) — runs in ALL modes ──
+      #   1|stack = after each stack (default)   N = every N stacks   0|end|off = only at the end
+      _sab_count=$((_sab_count + 1))
+      _sab_every="${SABLIER_RESTART_EVERY:-1}"
+      _sab_now=0
+      case "$_sab_every" in
+        end|0|off|never|no) _sab_now=0 ;;
+        stack|whole|1)      _sab_now=1 ;;
+        *) if [[ "$_sab_every" =~ ^[0-9]+$ ]] && [ "$_sab_count" -ge "$_sab_every" ]; then _sab_now=1; _sab_count=0; fi ;;
+      esac
+      if [ "$_sab_now" -eq 1 ]; then
+        echo "  -> Restarting sablier to register and sleep new containers (cadence=$_sab_every)..." | log_output
         command docker restart sablier >/dev/null 2>&1 || true
         # Wait max 2 min for sablier to become healthy
         _sab_wait=0
@@ -1800,6 +1893,13 @@ if [ "$COMMAND" == "up" ]; then
       fi
       smart_wait $DELAY
     done
+    # Final Sablier restart so it registers everything, when the cadence skipped per-stack restarts
+    case "${SABLIER_RESTART_EVERY:-1}" in
+      stack|whole|1) : ;;   # already restarted after the last stack
+      *) echo "  -> Final Sablier restart (cadence=${SABLIER_RESTART_EVERY:-1})..." | log_output
+         command docker restart sablier >/dev/null 2>&1 || true ;;
+    esac
+    fi
     CURRENT_STACK="System"
     CURRENT_SERVICE="Engine"
     update_ui "Restarting Docker..." 100
@@ -2485,8 +2585,12 @@ elif [ "$COMMAND" == "pull" ]; then
   init_ui
   CURRENT_STACK="$_ptarget"
   CURRENT_SERVICE="Pull Only"
+  # capture outgoing image versions before the pull overwrites them
+  python3 /usr/local/lib/stacks_image_history.py snapshot >/dev/null 2>&1 || true
   update_ui "Pulling images for $_ptarget..." 20
   run_live_cmd "Pulling" 20 docker compose -f "$_pf" pull --ignore-pull-failures
+  # capture the freshly-pulled versions too
+  python3 /usr/local/lib/stacks_image_history.py snapshot >/dev/null 2>&1 || true
   update_ui "Pull complete." 100
   finish_action_sequence "up"
 
@@ -2500,6 +2604,42 @@ elif [ "$COMMAND" == "ls" ]; then
   for s in "${STACKS[@]}"; do echo -e "  \e[1;36m$s\e[0m"; done
   echo ""
   exit 0
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: IMAGES (version history + rollback)
+# Usage: stacks images snapshot|list <image>|rollback <image> <digest>|prune
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "images" ]; then
+  printf "\e[?25h"
+  python3 /usr/local/lib/stacks_image_history.py "${TARGET_ARGS[@]}"
+  exit $?
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: DEDUPE (find/resolve duplicate container_names across stacks)
+# Usage: stacks dedupe [report] | stacks dedupe fix [--auto] | stacks dedupe keep <name> <stack>
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "dedupe" ]; then
+  printf "\e[?25h"
+  STACKS_DIR="$STACKS_DIR" python3 /usr/local/lib/stacks_dedupe.py "${TARGET_ARGS[@]}"
+  exit $?
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: VOLCLEAN (strip unused top-level named-volume declarations)
+# Usage: stacks volclean [report] | stacks volclean clean [--auto] [stack ...]
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "volclean" ]; then
+  printf "\e[?25h"
+  STACKS_DIR="$STACKS_DIR" python3 /usr/local/lib/stacks_volclean.py "${TARGET_ARGS[@]}"
+  exit $?
+
+# ---------------------------------------------------------
+# COMMAND BRANCH: RECLAIM (delete unused tagged images by size, tiered safety)
+# Usage: stacks reclaim report [--all] | stacks reclaim clean [--auto|--aggressive|--everything|--dangling] [--dry-run]
+# ---------------------------------------------------------
+elif [ "$COMMAND" == "reclaim" ]; then
+  printf "\e[?25h"
+  STACKS_DIR="$STACKS_DIR" python3 /usr/local/lib/stacks_reclaim.py "${TARGET_ARGS[@]}"
+  exit $?
 
 # ---------------------------------------------------------
 # COMMAND BRANCH: VOLUME
@@ -2820,16 +2960,19 @@ elif [ "$COMMAND" == "clean" ]; then
   fi
 
   # ── Images ─────────────────────────────────────────────────────────
+  # Two tiers:
+  #   dangling  → docker image prune -f       (untagged leftovers only)
+  #   ALL unused→ docker image prune -a -f     (every image NOT tied to an
+  #               existing container — frees the big space; container-bound
+  #               images are always kept. Idle stack images re-pull on next up.)
   if [ $DO_IMAGES -eq 1 ] || [ $DO_ALL -eq 1 ]; then
     update_ui "Removing dangling images..." $_pct
     docker image prune -f >> "$CLEAN_LOG" 2>&1 || true
     _pct=55
-    if [ $DO_ALL -eq 1 ] || [ $DO_NUKE -eq 1 ]; then
-      update_ui "Removing ALL unused images..." $_pct
-      docker image prune -f >> "$CLEAN_LOG" 2>&1 || true
-    fi
+    update_ui "Removing ALL unused images (keeping only container-bound)..." $_pct
+    docker image prune -a -f >> "$CLEAN_LOG" 2>&1 || true   # -a = the actual space reclaim
     _pct=65
-    echo -e "\n=== Images pruned ===" >> "$CLEAN_LOG"
+    echo -e "\n=== Images pruned (dangling + all unused) ===" >> "$CLEAN_LOG"
   fi
 
   # ── Builder cache ──────────────────────────────────────────────────
@@ -3648,6 +3791,19 @@ COLFIX
   clear_ui 2>/dev/null || true
   printf "\e[?25h"
   echo -e "\e[1;32m✨ Fix complete\e[0m"
+
+  # ── volume-mode sync (config-driven, no force flag needed) ────────────────
+  #   FIX_CONVERT_NAMED_TO_BIND=1 (bind)  → strip ALL top-level named-vol decls
+  #   FIX_CONVERT_NAMED_TO_BIND=0 (named) → add the declarations back
+  _vc_act=""
+  if [ "${FIX_CONVERT_NAMED_TO_BIND:-1}" = "1" ]; then _vc_act="clean --auto"
+  elif [ "${FIX_CONVERT_NAMED_TO_BIND}" = "0" ]; then _vc_act="ensure"; fi
+  if [ -n "$_vc_act" ]; then
+    if [ ${#PARSED_STACKS[@]} -gt 0 ]; then _vc_scope=( "${PARSED_STACKS[@]}" )
+    elif [ -n "$TARGET_STACK" ]; then _vc_scope=( "$TARGET_STACK" )
+    else _vc_scope=(); fi
+    STACKS_DIR="$STACKS_DIR" python3 /usr/local/lib/stacks_volclean.py $_vc_act "${_vc_scope[@]}" 2>/dev/null | grep -E '✓|removed|added' || true
+  fi
 
   # NOTE: `stacks fix` fixes COMPOSE ONLY — it never touches dynamics.
   # Dynamics are reconciled via `stacks up <stack> dynamics fix` (during deploy)

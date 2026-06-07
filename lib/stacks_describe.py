@@ -7,7 +7,7 @@ Usage: stacks_describe.py all | stackname
 import sys, os, re
 
 STACKS_DIR  = "/srv/stacks/Stacks"
-CONF_DIR    = "~/.config/stacks/descriptions"
+CONF_DIR    = "/home/user/.config/stacks/descriptions"
 
 LOOKUP = {
     "ollama":"Local LLM inference server with AMD ROCm GPU acceleration",

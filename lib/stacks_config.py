@@ -45,6 +45,8 @@ SCALAR_MAP = {
     'convert_to_bind_mounts':'FIX_CONVERT_NAMED_TO_BIND','force_volume_folder':'FIX_FORCE_VOLUME_BASE',
     'external_volumes':'FIX_EXTERNAL_VOLUMES','remove_all_depends':'FIX_REMOVE_DEPENDS',
     'replace_broken_healthchecks':'FIX_REPLACE_BROKEN_HC','remove_orphan_networks':'FIX_REMOVE_ORPHANS',
+    'auto_image_search':'FIX_AUTO_SEARCH',
+    'reclaim_protect_stack_images':'RECLAIM_PROTECT_STACK_IMAGES',
     'deep_inspect':'FIX_DEEP_INSPECT','backup_before_changes':'FIX_BACKUP',
     'auto_create_creator':'FIX_AUTO_CREATE_CREATOR','creator_name':'FIX_CREATOR_NAME',
     'creator_max_networks':'FIX_CREATOR_MAX_NETWORKS','creator_max_volumes':'FIX_CREATOR_MAX_VOLUMES',
@@ -85,7 +87,8 @@ LIST_MAP = {
     'never_sleep':('NEVER_SLEEP',' '), 'never_rename':('FIX_NEVER_RENAME',' '),
     'update_registries':('UPDATE_REGISTRIES',' '), 'stack_order':('STACK_ORDER',' '),
     'health_check_domains':('HEALTH_CHECK_DOMAINS',' '),
-    'ip_whitelist':('IP_WHITELIST',','), 'proxy_skip':('PROXY_SKIP_CONTAINERS',' '),
+    'ip_whitelist':('IP_WHITELIST',','), 'port_whitelist':('PORT_WHITELIST',','),
+    'proxy_skip':('PROXY_SKIP_CONTAINERS',' '),
     'scale_skip':('SCALE_SKIP_CONTAINERS',' '),
 }
 

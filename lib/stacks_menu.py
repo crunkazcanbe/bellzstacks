@@ -2,7 +2,7 @@
 """
 StacksMenu — Interactive TUI for stacks
 stacks menu  →  launches this
-Same look/feel as menu but focused on stack/container management
+Same look/feel as the menu but focused on stack/container management
 """
 
 import curses, os, re, subprocess, threading, time, json, sys
@@ -112,7 +112,7 @@ def get_stacks():
             path = os.path.join(STACKS_DIR, fname)
             # Get containers defined in this file
             r = subprocess.run(['docker','compose','-f',path,'ps','--format','json'],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=20)
             running = stopped = 0
             if r.returncode == 0:
                 for line in r.stdout.strip().split('\n'):
@@ -148,7 +148,7 @@ def get_containers():
         r = subprocess.run(
             ['docker','ps','-a','--format',
              '{"name":"{{.Names}}","status":"{{.Status}}","image":"{{.Image}}","state":"{{.State}}","stack":"{{.Label \"com.docker.compose.project\"}}"}'],
-            capture_output=True, text=True, timeout=10)
+            capture_output=True, text=True, timeout=45)
         if r.returncode == 0:
             for line in r.stdout.strip().split('\n'):
                 if not line.strip(): continue
@@ -164,6 +164,7 @@ def get_containers():
 
 def fetch_mem_stats():
     """Fetch docker stats and image sizes in background."""
+    _hist_tick = 0
     while True:
         try:
             r = subprocess.run(
@@ -193,6 +194,18 @@ def fetch_mem_stats():
                 with data_lock:
                     app_data['img_sizes'] = imgs
         except: pass
+        # Record image-version history (fast single-call snapshot): once at
+        # startup, then every ~20 ticks (~5 min). Cheap; respects the toggle.
+        try:
+            if _hist_tick % 20 == 0:
+                import sys as _s
+                if '/usr/local/lib' not in _s.path: _s.path.insert(0, '/usr/local/lib')
+                import stacks_image_history as _ih
+                if _ih.enabled():
+                    _ih.record_from_docker_images()
+        except Exception:
+            pass
+        _hist_tick += 1
         time.sleep(15)
 
 def refresh_data():
@@ -855,8 +868,12 @@ def _registry_search_inner(stdscr, term, bar_w, pct, title, spinner, frame):
         elif k in (27, 3, ord("q"), ord("Q")):
             return None
 
-def run_build_wizard(stdscr, new_stack=False):
-    """Full curses build wizard with back navigation."""
+def run_build_wizard(stdscr, new_stack=False, preselect_stack=None):
+    """Full curses build wizard with back navigation.
+
+    preselect_stack: when given (an existing stack name), the 'which stack?'
+    question is skipped — that stack is used as the target and the wizard starts
+    at the image question. Back-nav can't reverse into the skipped question."""
     import subprocess as _sp, glob as _gl, time as _t
     import sys as _bwsys
     _bw_log = open("/tmp/build_crash.log", "w")
@@ -936,6 +953,13 @@ def run_build_wizard(stdscr, new_stack=False):
 
         if current == "stack":
             pct[0] = 5
+            if preselect_stack:
+                # Stack already chosen (launched from the Stacks-tab action menu) —
+                # skip the question entirely and jump straight to the image step.
+                state["target_stack"] = preselect_stack
+                state["stack_name"] = preselect_stack
+                step = 1
+                continue
             if new_stack:
                 result = inp("New stack name (e.g. srvs_3):", state.get("stack_name") or "srvs_3")
                 if result is None or result == "":
@@ -1184,7 +1208,7 @@ def run_build_wizard(stdscr, new_stack=False):
         except: return 1
 
     def load_service_desc(svc):
-        default_desc = "A powerful service running on StacksServer. Edit this description in the descriptions config."
+        default_desc = "A powerful service running on Stacks. Edit this description in the descriptions config."
         try:
             for line in open(os.path.join(CONF_DIR, "stacks.conf")):
                 l = line.strip()
@@ -1271,8 +1295,8 @@ def run_build_wizard(stdscr, new_stack=False):
             # Different file - inject into that stack
             try:
                 _db_content = open(_db_fpath).read() if os.path.exists(_db_fpath) else f"name: {_db_stack}\nservices:\n"
-                if "##STACKS_ART_START_FOOTER" in _db_content:
-                    _db_content = _db_content.replace("##STACKS_ART_START_FOOTER", _db_block + "\n##STACKS_ART_START_FOOTER", 1)
+                if "##STACKSART_START_FOOTER" in _db_content:
+                    _db_content = _db_content.replace("##STACKSART_START_FOOTER", _db_block + "\n##STACKSART_START_FOOTER", 1)
                 else:
                     _db_lines = _db_content.splitlines(keepends=True)
                     _ins = len(_db_lines)
@@ -1292,8 +1316,8 @@ def run_build_wizard(stdscr, new_stack=False):
     fpath = os.path.join(STACKS_DIR, target_stack + ".yml")
     try:
         fcontent = open(fpath).read()
-        if "##STACKS_ART_START_FOOTER" in fcontent:
-            fcontent = fcontent.replace("##STACKS_ART_START_FOOTER", block + "\n##STACKS_ART_START_FOOTER", 1)
+        if "##STACKSART_START_FOOTER" in fcontent:
+            fcontent = fcontent.replace("##STACKSART_START_FOOTER", block + "\n##STACKSART_START_FOOTER", 1)
         else:
             lines_f = fcontent.splitlines(keepends=True)
             insert = len(lines_f)
@@ -1335,7 +1359,7 @@ def run_build_wizard(stdscr, new_stack=False):
 
     # Write to per-stack descriptions file
     try:
-        default_desc = "A powerful service running on StacksServer. Edit this description."
+        default_desc = "A powerful service running on Stacks. Edit this description."
         for line in open(os.path.join(CONF_DIR, "stacks.conf")):
             l = line.strip()
             if l.startswith("BUILD_DEFAULT_DESC="): default_desc = l.split("=",1)[1].strip('" ')
@@ -1685,6 +1709,16 @@ GLOBAL_ACTIONS = [
     ("↓  Scale OFF all",                      "scale_off_all"),
     ("↑  Proxy ON all",                       "proxy_on_all"),
     ("↓  Proxy OFF all",                      "proxy_off_all"),
+    ("🧹  Reclaim disk (unused images)",      "reclaim_menu"),
+    ("✕  Cancel",                             None),
+]
+
+# Sub-menu opened by the "Reclaim disk" global action — tiered by aggression.
+RECLAIM_ACTIONS = [
+    ("👁  Report — what's reclaimable",        "reclaim_report"),
+    ("🧹  Safe clean — unused + dangling",     "reclaim_safe"),
+    ("🔥  Aggressive — all but container-bound","reclaim_aggressive"),
+    ("💥  EVERYTHING — incl. in-use (force)",  "reclaim_everything"),
     ("✕  Cancel",                             None),
 ]
 
@@ -1705,6 +1739,10 @@ STACK_ACTIONS = [
     ("↓  Proxy OFF",                          "proxy_off"),
     ("🎨  Art Inject",                          "art_inject"),
     ("🧹  Art Strip",                           "art_strip"),
+    ("🛠  Build service into this stack…",     "build_into"),
+    ("✎  Rename stack",                        "rename"),
+    ("🧹  Reclaim disk (unused images)…",      "reclaim_menu"),
+    ("🗑  Remove (down -v + archive file)",     "remove"),
     ("✕  Cancel",                             None),
 ]
 
@@ -1726,9 +1764,21 @@ CONTAINER_ACTIONS = [
     ("↑  Proxy ON",                           "proxy_on"),
     ("↓  Proxy OFF",                          "proxy_off"),
     ("🔍  Inspect",                           "inspect"),
+    ("⏪  Rollback image…",                    "rollback"),
     ("🌐  Edit IP",                           "edit_ip"),
+    ("✎  Rename container",                   "rename"),
+    ("🧹  Reclaim disk (unused images)…",      "reclaim_menu"),
+    ("🗑  Remove (force rm)",                  "remove"),
     ("✕  Cancel",                             None),
 ]
+
+def _confirm_popup(stdscr, title, danger_label):
+    """Yes/No confirm. 'No' is the default (first) choice. Returns True if confirmed."""
+    res = run_popup_action(stdscr, title, [
+        ("✕  No — cancel", None),
+        (danger_label, "yes"),
+    ])
+    return bool(res and res[1] == "yes")
 
 def do_global_action(stdscr, action):
     if action is None: return
@@ -1760,9 +1810,40 @@ def do_global_action(stdscr, action):
         run_log_popup(stdscr, 'Proxy ON all', f'{STACKS_BIN} proxy on')
     elif action == 'proxy_off_all':
         run_log_popup(stdscr, 'Proxy OFF all', f'{STACKS_BIN} proxy off')
+    elif action == 'reclaim_menu':
+        run_reclaim_menu(stdscr)
+
+def run_reclaim_menu(stdscr):
+    """Tiered disk-reclaim sub-menu — shared by global, per-stack and per-container
+    action popups. Destructive tiers are gated by a confirm popup, then run --auto."""
+    res = run_popup_action(stdscr, '🧹 Reclaim disk', RECLAIM_ACTIONS)
+    if not res or res[1] is None:
+        return
+    sub = res[1]
+    if sub == 'reclaim_report':
+        run_log_popup(stdscr, 'Reclaim report', f'{STACKS_BIN} reclaim report --all')
+    elif sub == 'reclaim_safe':
+        if _confirm_popup(stdscr, 'Remove unused + dangling images?', '🧹  Yes — safe clean'):
+            run_log_popup(stdscr, 'Reclaim (safe)', f'{STACKS_BIN} reclaim clean --auto')
+    elif sub == 'reclaim_aggressive':
+        if _confirm_popup(stdscr, 'Delete ALL but container-bound? (idle stacks re-pull)',
+                          '🔥  Yes — aggressive'):
+            run_log_popup(stdscr, 'Reclaim (aggressive)',
+                          f'{STACKS_BIN} reclaim clean --aggressive --auto')
+    elif sub == 'reclaim_everything':
+        if _confirm_popup(stdscr, 'NUKE every image incl. in-use? Running stacks re-pull!',
+                          '💥  Yes — delete EVERYTHING'):
+            run_log_popup(stdscr, 'Reclaim (EVERYTHING)',
+                          f'{STACKS_BIN} reclaim clean --everything --auto')
 
 def do_stack_action(stdscr, stack_name, action):
     if action is None: return
+    if action == 'reclaim_menu':
+        run_reclaim_menu(stdscr); return
+    if action == 'build_into':
+        # Launch the build wizard pre-targeted at this stack (skips the
+        # "which stack?" question, starts at the image question).
+        run_build_wizard(stdscr, preselect_stack=stack_name); return
     if action == 'up':
         cmd = f'{STACKS_BIN} up {stack_name}'
     elif action == 'down':
@@ -1824,6 +1905,40 @@ def do_stack_action(stdscr, stack_name, action):
         run_log_popup(stdscr, f'Art strip: {stack_name}',
             f'{STACKS_BIN} art strip {stack_name}')
         return
+    elif action == 'rename':
+        new = _prompt_text(stdscr, f'Rename stack {stack_name}',
+                           'New stack name:', stack_name, cancel_val=None)
+        if new is None or not new or new == stack_name: return
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', new):
+            run_log_popup(stdscr, 'Rename', f'echo "Invalid name: {new} (letters/numbers/_/-/. only)"'); return
+        old_yml = f'{STACKS_DIR}/{stack_name}.yml'
+        new_yml = f'{STACKS_DIR}/{new}.yml'
+        if os.path.exists(new_yml):
+            run_log_popup(stdscr, 'Rename', f'echo "{new}.yml already exists — aborting"'); return
+        if not _confirm_popup(stdscr, f'Rename {stack_name} -> {new}?',
+                              '✎  YES — down, rename, up'):
+            return
+        run_cmd_silent(stdscr, f'Down {stack_name}', f'{STACKS_BIN} down {stack_name}')
+        ok, msg = _rename_stack_file(old_yml, new_yml, new)
+        if not ok:
+            run_log_popup(stdscr, 'Rename failed', f'echo "{msg}"'); return
+        run_log_popup(stdscr, f'Up {new}',
+                      f'echo "{msg}"; echo "(note: update stack_order / dynamics if they reference {stack_name})"; '
+                      f'{STACKS_BIN} up {new}')
+        return
+    elif action == 'remove':
+        if not _confirm_popup(stdscr, f'Remove stack {stack_name}?',
+                              '🗑  YES — down -v + archive .yml'):
+            return
+        yml = f'{STACKS_DIR}/{stack_name}.yml'
+        archive = f'{STACKS_DIR}/.removed'
+        cmd = (f'mkdir -p "{archive}" && '
+               f'{STACKS_BIN} down {stack_name} clean ; '
+               f'if [ -f "{yml}" ]; then mv "{yml}" "{archive}/{stack_name}.yml.removed" && '
+               f'echo "Archived {stack_name}.yml -> {archive}/"; fi ; '
+               f'echo "Removed stack {stack_name}"')
+        run_log_popup(stdscr, f'Remove {stack_name}', cmd)
+        return
     else: return
     run_log_popup(stdscr, f'{action} → {stack_name}', cmd)
 
@@ -1876,6 +1991,32 @@ Mounts: {{len .Mounts}} volumes''',
         elif k in (27, ord('q')): break
 
 
+def _image_for_container(stack_file, cname):
+    """Return the compose `image:` for the service whose container_name is cname,
+    so rollback keys match the history DB. Falls back to docker inspect."""
+    if stack_file:
+        try:
+            lines = open(stack_file, encoding='utf-8').read().split('\n')
+            ci = None
+            for i, l in enumerate(lines):
+                if re.match(r'^\s*container_name:\s*"?' + re.escape(cname) + r'"?\s*$', l):
+                    ci = i; break
+            if ci is not None:
+                skey = ci
+                while skey > 0 and not re.match(r'^  [A-Za-z0-9_.-]+:\s*$', lines[skey]): skey -= 1
+                end = skey + 1
+                while end < len(lines) and not re.match(r'^  [A-Za-z0-9_.-]+:\s*$', lines[end]): end += 1
+                for j in range(skey, end):
+                    m = re.match(r'^\s*image:\s*([^\s#]+)', lines[j])
+                    if m: return m.group(1).strip().strip('"').strip("'")
+        except Exception: pass
+    try:
+        r = subprocess.run(['docker', 'inspect', '--format', '{{.Config.Image}}', cname],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
 def _get_container_ip(cname):
     """Current IP for a container from ip_assignments.conf (container=IP[:port])."""
     try:
@@ -1916,8 +2057,48 @@ def _apply_container_ip(stack_file, cname, old_ip, new_ip):
         open(stack_file,'w',encoding='utf-8').write("\n".join(lines))
     except Exception: pass
 
-def _prompt_text(stdscr, title, prompt, default=''):
-    """Centered curses single-line text input. Returns string ('' on cancel)."""
+def _rename_container_in_file(stack_file, old, new):
+    """Change `container_name: old` -> new in the compose file and migrate the
+    ip_assignments.conf key. Leaves the service key untouched (compose matches
+    by service, so the live container just gets renamed on the next up)."""
+    try:
+        ap = os.path.expanduser('~/.config/stacks/ip_assignments.conf')
+        if os.path.exists(ap):
+            lines = open(ap).read().splitlines(); out = []
+            for l in lines:
+                if l.strip().startswith(old + '='):
+                    out.append(new + '=' + l.split('=', 1)[1])
+                else:
+                    out.append(l)
+            open(ap, 'w').write("\n".join(out) + "\n")
+    except Exception: pass
+    if not stack_file: return
+    try:
+        txt = open(stack_file, encoding='utf-8').read()
+        txt = re.sub(r'(?m)^(\s*container_name:\s*)"?' + re.escape(old) + r'"?\s*$',
+                     lambda m: m.group(1) + new, txt)
+        open(stack_file, 'w', encoding='utf-8').write(txt)
+    except Exception: pass
+
+def _rename_stack_file(old_yml, new_yml, new_name):
+    """Rewrite the top-level `name:` to new_name, then move old_yml -> new_yml.
+    Returns (ok, message)."""
+    try:
+        txt = open(old_yml, encoding='utf-8').read()
+        if re.search(r'(?m)^name:\s*.*$', txt):
+            txt = re.sub(r'(?m)^name:\s*.*$', f'name: {new_name}', txt, count=1)
+        else:
+            txt = f'name: {new_name}\n' + txt
+        open(old_yml, 'w', encoding='utf-8').write(txt)
+        os.rename(old_yml, new_yml)
+        return True, f'Renamed -> {os.path.basename(new_yml)}'
+    except Exception as e:
+        return False, str(e)
+
+def _prompt_text(stdscr, title, prompt, default='', cancel_val=''):
+    """Centered curses single-line text input. Returns the typed string on save,
+    or cancel_val on ESC (default '' for back-compat; pass None to distinguish
+    a real cancel from an intentionally-blank save)."""
     h,w=stdscr.getmaxyx()
     pw=max(len(title)+6,len(prompt)+30,46); ph=6
     win=curses.newwin(ph,pw,(h-ph)//2,(w-pw)//2); win.keypad(True)
@@ -1936,7 +2117,7 @@ def _prompt_text(stdscr, title, prompt, default=''):
             win.refresh()
             k=win.getch()
             if k in (10,13): return ''.join(buf).strip()
-            if k==27: return ''
+            if k==27: return cancel_val
             if k in (curses.KEY_BACKSPACE,127,8):
                 if buf: buf.pop()
             elif 32<=k<127: buf.append(chr(k))
@@ -1990,6 +2171,8 @@ def do_container_action(stdscr, container_name, stack_file, action):
 
     curses.flushinp()
     if action is None: return
+    if action == 'reclaim_menu':
+        run_reclaim_menu(stdscr); return
     stack_name = os.path.basename(stack_file).replace('.yml','') if stack_file else ''
     if action == 'start':
         cmd = f'docker start {container_name}'
@@ -2020,6 +2203,74 @@ def do_container_action(stdscr, container_name, stack_file, action):
         else: return
     elif action == 'inspect':
         _show_container_inspect(stdscr, container_name)
+        return
+    elif action == 'rollback':
+        import time as _t, sys as _s
+        if '/usr/local/lib' not in _s.path: _s.path.insert(0, '/usr/local/lib')
+        try:
+            import stacks_image_history as _ih
+        except Exception as e:
+            run_log_popup(stdscr, 'Rollback', f'echo "image-history module unavailable: {e}"'); return
+        image = _image_for_container(stack_file, container_name)
+        if not image:
+            run_log_popup(stdscr, 'Rollback',
+                f'echo "Could not determine the image for {container_name}."'); return
+        _ih.record(image)  # capture the current version before listing
+        vers = _ih.history(image)
+        if not vers:
+            run_log_popup(stdscr, 'Rollback',
+                f'echo "No version history yet for {image}."; '
+                f'echo "History builds over time — the menu snapshots on open + every few minutes,"; '
+                f'echo "and each pull/update is recorded. Check back after the next image change."')
+            return
+        opts = []
+        for v in vers:
+            when = _t.strftime('%m-%d %H:%M', _t.localtime(v['last_seen']))
+            mark = '● ' if v['current'] else '  '
+            cur = '  (current)' if v['current'] else ''
+            opts.append((f"{mark}{v['short']}   {when}{cur}", v['digest']))
+        opts.append(("✕  Cancel", None))
+        res = run_popup_action(stdscr, f'Rollback {image[:26]}', opts)
+        if not (res and res[1]): return
+        if any(v['digest'] == res[1] and v['current'] for v in vers):
+            run_log_popup(stdscr, 'Rollback', 'echo "That version is already running."'); return
+        if not _confirm_popup(stdscr, f'Roll {image[:18]} back to {_ih.short(res[1])}?',
+                              '⏪  YES — pin + recreate'):
+            return
+        repo = _ih._repo_no_tag(image)
+        ref = f"{repo}@{res[1]}"
+        recreate = (f'{STACKS_BIN} up {stack_name} {container_name} recreate' if stack_name
+                    else f'docker rm -f "{container_name}"')
+        snap = 'python3 /usr/local/lib/stacks_image_history.py snapshot >/dev/null 2>&1 || true'
+        cmd = (f'echo "Pulling {ref}" && docker pull "{ref}" && '
+               f'docker tag "{ref}" "{image}" && echo "Pinned {image} -> {_ih.short(res[1])}" && '
+               f'{recreate} ; {snap}')
+        run_log_popup(stdscr, f'Rollback {_ih.short(res[1])}', cmd)
+        return
+    elif action == 'rename':
+        if not stack_name:
+            run_log_popup(stdscr, 'Rename',
+                f'echo "{container_name} has no known stack — cannot rename in compose."'); return
+        new = _prompt_text(stdscr, f'Rename {container_name[:20]}',
+                           'New container name:', container_name, cancel_val=None)
+        if new is None or not new or new == container_name: return
+        if not re.match(r'^[a-zA-Z0-9_.-]+$', new):
+            run_log_popup(stdscr, 'Rename', f'echo "Invalid name: {new}"'); return
+        if not _confirm_popup(stdscr, f'Rename {container_name[:18]} -> {new}?',
+                              '✎  YES — edit compose + rename live'):
+            return
+        _rename_container_in_file(stack_file, container_name, new)
+        run_log_popup(stdscr, f'Rename -> {new}',
+                      f'docker rename "{container_name}" "{new}" 2>&1 || '
+                      f'echo "(not running; compose updated, applies on next up)"; '
+                      f'echo "Renamed {container_name} -> {new}"')
+        return
+    elif action == 'remove':
+        if not _confirm_popup(stdscr, f'Remove container {container_name[:24]}?',
+                              '🗑  YES — force rm'):
+            return
+        run_log_popup(stdscr, f'Remove {container_name}',
+                      f'docker rm -f "{container_name}" && echo "Removed {container_name}"')
         return
     elif action == 'edit_ip':
         cur = _get_container_ip(container_name)
@@ -2073,19 +2324,19 @@ def do_container_action(stdscr, container_name, stack_file, action):
     run_log_popup(stdscr, f'{action} → {container_name}', cmd)
 
 # ── Tab views ────────────────────────────────────────────────────────────────
-TABS = ['Containers', 'Stacks', 'Logs', 'Dynamics', 'Art', 'Backup', 'Build', 'Configs', 'Network', 'Updates']
+TABS = ['Containers', 'Stacks', 'Logs', 'Dynamics', 'Art', 'Backup', 'Build', 'Configs', 'Network', 'Updates', 'Settings']
 
 def draw_containers_tab(win, h, w, containers, sel, scroll):
-    win.addstr(3, 2, f'{"NAME":<26} {"STACK":<12} {"STATUS":<12} {"MEMORY":<19} {"SIZE":<9} {"IMAGE"}',
+    win.addstr(4, 2, f'{"NAME":<26} {"STACK":<12} {"STATUS":<12} {"MEMORY":<19} {"CACHE":<9} {"IMAGE"}',
                curses.color_pair(C_ACCENT))
-    win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
+    win.addstr(5, 2, '─' * (w-4), curses.color_pair(C_DIM))
 
-    visible = h - 7
+    visible = h - 8
     items = containers[scroll:scroll+visible]
 
 
     for i, c in enumerate(items):
-        y = 5 + i
+        y = 6 + i
         idx = scroll + i
         name   = c.get('name','')[:34]
         state  = c.get('state','')
@@ -2099,9 +2350,16 @@ def draw_containers_tab(win, h, w, containers, sel, scroll):
         indicator = '●' if is_running else '○'
 
         mem = app_data['mem_stats'].get(c.get('name',''), '')[:18]
-        img_sz = app_data['img_sizes'].get(image, app_data['img_sizes'].get(image.split(':')[0]+':latest',''))[:8]
+        image_full = c.get('image','')
+        _imgs = app_data['img_sizes']
+        _isz = _imgs.get(image_full) or _imgs.get(image_full.split(':')[0] + ':latest')
+        cached = bool(_isz)
+        if cached:
+            sz_cell = (_isz or 'cached')[:8]; sz_color = C_CYAN
+        else:
+            sz_cell = '↓ pull'; sz_color = C_RED
         if idx == sel:
-            line = f'{indicator} {name:<26} {stack:<12} {status:<12} {mem:<19} {img_sz:<9} {image}'
+            line = f'{indicator} {name:<26} {stack:<12} {status:<12} {mem:<19} {sz_cell:<9} {image}'
             try: win.addstr(y, 2, line[:w-4], curses.color_pair(C_SELECTED))
             except: pass
         else:
@@ -2111,24 +2369,24 @@ def draw_containers_tab(win, h, w, containers, sel, scroll):
                 win.addstr(y, 31, f'{stack:<12}', curses.color_pair(C_GREEN if stack else C_DIM))
                 win.addstr(y, 44, f'{status:<12}', curses.color_pair(C_DIM))
                 win.addstr(y, 56, f'{mem:<19}', curses.color_pair(C_YELLOW if mem else C_DIM))
-                win.addstr(y, 75, f'{img_sz:<9}', curses.color_pair(C_CYAN if img_sz else C_DIM))
+                win.addstr(y, 75, f'{sz_cell:<9}', curses.color_pair(sz_color))
                 win.addstr(y, 84, f'{image}'[:w-86], curses.color_pair(C_DIM))
             except: pass
 
 def draw_stacks_tab(win, h, w, stacks, sel, scroll):
     try:
-        win.addstr(3, 2, "[ A ] All-Stacks Actions", curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, f'{"STACK":<20} {"RUN/T":<8} {"KB":<7}  {"IMG SIZE":<10} {"RAM":<9} {"STATUS"}',
+        win.addstr(4, 2, "[ A ] All-Stacks Actions", curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, f'{"STACK":<20} {"RUN/T":<8} {"KB":<7}  {"IMG C/T":<11} {"RAM":<9} {"STATUS"}',
                    curses.color_pair(C_YELLOW))
-        win.addstr(5, 2, '─' * (w-4), curses.color_pair(C_DIM))
+        win.addstr(6, 2, '─' * (w-4), curses.color_pair(C_DIM))
     except: pass
 
-    visible = h - 8
+    visible = h - 9
     items = stacks[scroll:scroll+visible]
 
 
     for i, s in enumerate(items):
-        y = 5 + i
+        y = 6 + i
         idx = scroll + i
         name    = s['name'][:24]
         running = s['running']
@@ -2159,6 +2417,17 @@ def draw_stacks_tab(win, h, w, stacks, sel, scroll):
                     elif 'kB' in sz_str: img_total += float(sz_str.replace('kB','')) / 1024
                 except: pass
         img_total_str = f'{img_total:.0f}MB' if img_total < 1024 else f'{img_total/1024:.1f}GB'
+        # How many of this stack's images are pulled/cached locally
+        imgs_list = s.get('images', [])
+        cached_n = sum(1 for img in imgs_list
+                       if app_data['img_sizes'].get(img)
+                       or app_data['img_sizes'].get(img.split(':')[0] + ':latest'))
+        total_img = len(imgs_list)
+        if total_img:
+            img_cell = f'{img_total_str} {cached_n}/{total_img}'
+            img_color = C_GREEN if cached_n == total_img else (C_YELLOW if cached_n else C_RED)
+        else:
+            img_cell = img_total_str; img_color = C_DIM
         # Total memory for this stack - only containers in THIS stack
         stack_mem = 0.0
         try:
@@ -2175,29 +2444,29 @@ def draw_stacks_tab(win, h, w, stacks, sel, scroll):
         except: pass
         mem_str = f'{stack_mem:.0f}M' if running > 0 and stack_mem > 0 else ''
         if idx == sel:
-            line = f'{name:<20} {running:>3}/{total:<4} {size_str:<7} {img_total_str:<10} {mem_str:<9} {status}'
+            line = f'{name:<20} {running:>3}/{total:<4} {size_str:<7} {img_cell:<11} {mem_str:<9} {status}'
             try: win.addstr(y, 2, line[:w-4], curses.color_pair(C_SELECTED))
             except: pass
         else:
             try:
                 win.addstr(y, 2,  f'{name:<20} {running:>3}/{total:<4}', curses.color_pair(C_NORMAL))
                 win.addstr(y, 33, f'{size_str:<7}', curses.color_pair(C_DIM))
-                win.addstr(y, 41, f'{img_total_str:<10}', curses.color_pair(C_CYAN if img_total > 0 else C_DIM))
+                win.addstr(y, 41, f'{img_cell:<11}'[:11], curses.color_pair(img_color))
                 win.addstr(y, 52, f'{mem_str:<9}', curses.color_pair(C_YELLOW if mem_str else C_DIM))
                 win.addstr(y, 62, f'{status}', curses.color_pair(color))
             except: pass
 
 def draw_logs_tab(win, h, w, log_lines, sel, scroll):
     try:
-        win.addstr(3, 2, "DOCKER LOGS", curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        win.addstr(4, 2, "DOCKER LOGS", curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, "─" * (w-4), curses.color_pair(C_DIM))
         import glob as _glob
         _log_dir = '/srv/stacks'
         sources = [(f.split('/')[-1], f'cat {f}', f) for f in sorted(_glob.glob(f'{_log_dir}/stacks_*.log'))]
         if not sources: sources = [('No logs found', 'echo No stacks logs found', '')]
-        visible = h - 7
+        visible = h - 8
         for i, (label, _, fpath) in enumerate(sources):
-            y = 5 + i
+            y = 6 + i
             if y >= h - 2: break
             try: fsize = f"{os.path.getsize(fpath)//1024}K" if fpath else ""
             except: fsize = ""
@@ -2214,11 +2483,11 @@ def draw_logs_tab(win, h, w, log_lines, sel, scroll):
 def draw_dynamics_tab(win, h, w, sel):
     try:
         import glob as _g
-        win.addstr(3, 2, "DYNAMIC CONFIGS  [ A = inject art into selected ]", curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        win.addstr(4, 2, "DYNAMIC CONFIGS  [ A = inject art into selected ]", curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, "─" * (w-4), curses.color_pair(C_DIM))
         files = sorted(_g.glob(f"{DYNAMICS_DIR}/*.yml") + _g.glob(f"{DYNAMICS_DIR}/*.yaml"))
         for i, f in enumerate(files):
-            y = 5 + i
+            y = 6 + i
             if y >= h-2: break
             label = os.path.basename(f)
             try: fsize = f"{os.path.getsize(f)//1024}K"
@@ -2238,7 +2507,7 @@ ART_ITEMS = [
     ("Strip art from ALL stacks",            "art_strip_all"),
     ("Inject art into ALL dynamics",         "art_inject_dyn"),
     ("Strip art from ALL dynamics",          "art_strip_dyn"),
-    ("Edit art.conf",                   "edit_art"),
+    ("Edit art.conf",                   "edit_stacksart"),
     ("Edit stack_urls.conf",                 "edit_urls"),
     ("Generate dynamics from ALL stacks",    "gen_dyn_all"),
     ("Force regenerate ALL dynamics",        "gen_dyn_force"),
@@ -2247,11 +2516,11 @@ ART_ITEMS = [
 
 def draw_art_tab(win, h, w, sel=0):
     try:
-        win.addstr(3, 2, "ART & DYNAMICS", curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        win.addstr(4, 2, "ART & DYNAMICS", curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, "─" * (w-4), curses.color_pair(C_DIM))
     except: pass
     for i, (label, _) in enumerate(ART_ITEMS):
-        y = 5 + i
+        y = 6 + i
         if y >= h-2: break
         if i == sel:
             try: win.addstr(y, 2, f"  ▶  {label:<55}", curses.color_pair(C_SELECTED))
@@ -2272,11 +2541,11 @@ BACKUP_ITEMS = [
 
 def draw_backup_tab(win, h, w, sel=0):
     try:
-        win.addstr(3, 2, "BACKUP & LOGS", curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        win.addstr(4, 2, "BACKUP & LOGS", curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, "─" * (w-4), curses.color_pair(C_DIM))
     except: pass
     for i, (label, _) in enumerate(BACKUP_ITEMS):
-        y = 5 + i
+        y = 6 + i
         if y >= h-2: break
         if i == sel:
             try: win.addstr(y, 2, f"  ▶  {label:<55}", curses.color_pair(C_SELECTED))
@@ -2299,11 +2568,11 @@ BUILD_ITEMS = [
 
 def draw_build_tab(win, h, w, sel=0):
     try:
-        win.addstr(3, 2, 'BUILD', curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, '─' * (w-4), curses.color_pair(C_DIM))
+        win.addstr(4, 2, 'BUILD', curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, '─' * (w-4), curses.color_pair(C_DIM))
     except: pass
     for i, (label, _) in enumerate(BUILD_ITEMS):
-        y = 5 + i
+        y = 6 + i
         if y >= h-2: break
         if i == sel:
             try: win.addstr(y, 2, f'  ▶  {label:<50}', curses.color_pair(C_SELECTED))
@@ -2343,12 +2612,12 @@ def get_config_items():
 
 def draw_configs_tab(win, h, w, sel):
     try:
-        win.addstr(3, 2, "CONFIGS", curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        win.addstr(4, 2, "CONFIGS", curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, "─" * (w-4), curses.color_pair(C_DIM))
     except: pass
     items = get_config_items()
     for i, (label, fpath, is_dir) in enumerate(items):
-        y = 6 + i
+        y = 7 + i
         if y >= win.getmaxyx()[0]-2: break
         try:
             sz = os.path.getsize(fpath) if not is_dir else sum(
@@ -2371,14 +2640,14 @@ _net_cache = {"data": None, "ts": 0}
 def draw_network_tab(win, h, w, sel=0):
     """IP and port collision detection tab."""
     try:
-        win.addstr(3, 2, "NETWORK — IP & PORT COLLISION DETECTION", curses.color_pair(C_ACCENT))
-        win.addstr(4, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        win.addstr(4, 2, "NETWORK — IP & PORT COLLISION DETECTION", curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, "─" * (w-4), curses.color_pair(C_DIM))
     except: pass
     try:
         import importlib.util as _ilu, time as _t
         # Only rescan every 30 seconds
         if _net_cache["data"] is None or _t.time() - _net_cache["ts"] > 30:
-            try: win.addstr(3, 42, " scanning... ", curses.color_pair(C_DIM))
+            try: win.addstr(4, 42, " scanning... ", curses.color_pair(C_DIM))
             except: pass
             win.refresh()
             spec = _ilu.spec_from_file_location("stacks_collision", "/usr/local/lib/stacks_collision.py")
@@ -2403,32 +2672,48 @@ def draw_network_tab(win, h, w, sel=0):
             try: win.addstr(yy, xx, str(txt)[:max(0, w-xx-1)], curses.color_pair(cp))
             except Exception: pass
 
+        # Bucket port collisions: LIVE (2+ running on same ip:port) / LATENT
+        # (duplicate only declared in files) / BLACKLISTED (single container on a
+        # blacklisted port — usually a proxy that's meant to, e.g. traefik:443).
+        _act = [c for c in port_col if c.get('active')]
+        _lat = [c for c in port_col if not c.get('active') and c.get('type') == 'duplicate']
+        _bl  = [c for c in port_col if c.get('type') == 'blacklisted']
+
         # Summary
-        P(5, 2, f"IPs in use: {len(ip_map)}    Ports in use: {len(port_map)}    IP collisions: {len(ip_col)}    Port collisions: {len(port_col)}", C_YELLOW)
-        P(6, 2, f"Next free IP: {next_ip or 'NONE'}", C_GREEN if next_ip else C_RED)
+        P(6, 2, f"IPs in use: {len(ip_map)}    Ports in use: {len(port_map)}    "
+                f"IP issues: {len(ip_col)}    Ports: {len(_act)} LIVE / {len(_lat)} latent / {len(_bl)} on-blacklist",
+          C_RED if _act else C_YELLOW)
+        P(7, 2, f"Next free IP: {next_ip or 'NONE'}", C_GREEN if next_ip else C_RED)
 
         # Config panel
-        P(8, 2, "── CONFIG ────────────────────", C_ACCENT)
-        P(9, 4,  f"IP range    : {cfg.get('IP_RANGE_START','?')}  →  {cfg.get('IP_RANGE_END','?')}", C_CYAN)
-        P(10, 4, f"Port range  : {cfg.get('PORT_RANGE_START','?')}  →  {cfg.get('PORT_RANGE_END','?')}", C_CYAN)
-        P(11, 4, f"IP blacklist : {cfg.get('IP_BLACKLIST','') or '(none)'}", C_DIM)
-        P(12, 4, f"IP whitelist : {cfg.get('IP_WHITELIST','') or '(none)'}", C_DIM)
-        P(13, 4, f"Port blacklist: {cfg.get('PORT_BLACKLIST','') or '(none)'}", C_DIM)
+        P(9, 2, "── CONFIG ────────────────────", C_ACCENT)
+        P(10, 4,  f"IP range    : {cfg.get('IP_RANGE_START','?')}  →  {cfg.get('IP_RANGE_END','?')}", C_CYAN)
+        P(11, 4, f"Port range  : {cfg.get('PORT_RANGE_START','?')}  →  {cfg.get('PORT_RANGE_END','?')}", C_CYAN)
+        P(12, 4, f"IP blacklist : {cfg.get('IP_BLACKLIST','') or '(none)'}", C_DIM)
+        P(13, 4, f"IP whitelist : {cfg.get('IP_WHITELIST','') or '(none)'}", C_DIM)
+        P(14, 4, f"Port blacklist: {cfg.get('PORT_BLACKLIST','') or '(none)'}", C_DIM)
+        P(15, 4, f"Port whitelist: {cfg.get('PORT_WHITELIST','') or '(none)'}", C_DIM)
 
         # Collisions
-        y = 15
+        y = 17
         if ip_col:
-            P(y, 2, "⚠ IP COLLISIONS:", C_RED); y+=1
-            for c in ip_col[:6]:
+            P(y, 2, "⚠ IP ISSUES:", C_RED); y+=1
+            for c in ip_col[:4]:
                 P(y, 4, f"{c['type']:12} {c['ip']:18} " + ", ".join(f"{ss}/{nn}" for ss,nn in c['owners'][:3]), C_RED); y+=1
+        if _act:
+            P(y, 2, "⚠ LIVE PORT COLLISIONS (running containers fighting):", C_RED); y+=1
+            for c in _act[:6]:
+                P(y, 4, f"{c['ip']}:{str(c['port']):<6} " + ", ".join(f"{ss}/{nn}" for ss,nn in c['owners'][:3]), C_RED); y+=1
         else:
-            P(y, 2, "✔ No IP collisions", C_GREEN); y+=1
-        if port_col:
-            P(y, 2, "⚠ PORT COLLISIONS:", C_RED); y+=1
-            for c in port_col[:6]:
-                P(y, 4, f"{c['type']:12} port {c['port']:8} " + ", ".join(f"{ss}/{nn}" for ss,nn in c['owners'][:3]), C_RED); y+=1
-        else:
-            P(y, 2, "✔ No port collisions", C_GREEN); y+=1
+            P(y, 2, "✔ No LIVE port collisions — nothing running is fighting", C_GREEN); y+=1
+        if _lat:
+            P(y, 2, f"• {len(_lat)} latent (in files, not all running — fine until they overlap):", C_YELLOW); y+=1
+            for c in _lat[:5]:
+                P(y, 4, f"{c['ip']}:{str(c['port']):<6} " + ", ".join(f"{ss}/{nn}" for ss,nn in c['owners'][:3]), C_DIM); y+=1
+        if _bl:
+            P(y, 2, f"• {len(_bl)} on blacklisted ports (usually proxies that should — e.g. traefik:443):", C_DIM); y+=1
+            for c in _bl[:3]:
+                P(y, 4, f"{c['ip']}:{str(c['port']):<6} " + ", ".join(f"{nn}" for _ss,nn in c['owners'][:3]), C_DIM); y+=1
 
         # Two columns: IPs in use | Ports in use
         y += 1
@@ -2444,7 +2729,7 @@ def draw_network_tab(win, h, w, sel=0):
             if yy >= h-2: break
             P(yy, col2+2, f"{key:<22} {','.join(nn for _,nn in owners[:1])}", C_NORMAL); yy+=1
     except Exception as e:
-        try: win.addstr(5, 2, f"Error: {e}", curses.color_pair(C_RED))
+        try: win.addstr(6, 2, f"Error: {e}", curses.color_pair(C_RED))
         except: pass
 
 NETWORK_ACTIONS = [
@@ -2465,6 +2750,8 @@ NETWORK_EDIT_ACTIONS = [
     ("➖ Remove IP from whitelist", "ip_wl_rm"),
     ("➕ Add port to blacklist",    "port_bl_add"),
     ("➖ Remove port from blacklist","port_bl_rm"),
+    ("➕ Add port to whitelist",    "port_wl_add"),
+    ("➖ Remove port from whitelist","port_wl_rm"),
     ("↻  Rescan now",              "rescan"),
     ("✕  Cancel",                  None),
 ]
@@ -2478,8 +2765,10 @@ def do_network_action(stdscr, action):
                "ip_end":("ip_range_end","IP_RANGE_END","End IP:"),
                "port_start":("port_range_start","PORT_RANGE_START","Start port:"),
                "port_end":("port_range_end","PORT_RANGE_END","End port:")}
-    adds = {"ip_bl_add":"ip_blacklist","ip_wl_add":"ip_whitelist","port_bl_add":"port_blacklist"}
-    rms  = {"ip_bl_rm":"ip_blacklist","ip_wl_rm":"ip_whitelist","port_bl_rm":"port_blacklist"}
+    adds = {"ip_bl_add":"ip_blacklist","ip_wl_add":"ip_whitelist",
+            "port_bl_add":"port_blacklist","port_wl_add":"port_whitelist"}
+    rms  = {"ip_bl_rm":"ip_blacklist","ip_wl_rm":"ip_whitelist",
+            "port_bl_rm":"port_blacklist","port_wl_rm":"port_whitelist"}
     if action in scalars:
         fk, ik, prompt = scalars[action]
         v = _prompt_text(stdscr, f"Edit {fk}", prompt, cfg.get(ik, ""))
@@ -2557,21 +2846,21 @@ def draw_updates_tab(win, h, w, rows, summary, sel, scroll):
     """Image update tracker tab — available updates + searchable history."""
     import time as _t
     try:
-        win.addstr(3, 2, f"⬆ Updates: {summary['updates']}   ✔ OK: {summary['ok']}   "
+        win.addstr(4, 2, f"⬆ Updates: {summary['updates']}   ✔ OK: {summary['ok']}   "
                          f"✘ Err: {summary['errors']}   ⟳ History: {summary['hist']}",
                    curses.color_pair(C_YELLOW))
-        win.addstr(4, 2, f'{"WHEN":<13} {"EVENT":<10} {"IMAGE":<40} {"OLD → NEW"}',
+        win.addstr(5, 2, f'{"WHEN":<13} {"EVENT":<10} {"IMAGE":<40} {"OLD → NEW"}',
                    curses.color_pair(C_ACCENT))
-        win.addstr(5, 2, "─" * (w-4), curses.color_pair(C_DIM))
+        win.addstr(6, 2, "─" * (w-4), curses.color_pair(C_DIM))
     except: pass
     if not rows:
-        try: win.addstr(7, 2, "No updates or history yet. Press C to check for updates.",
+        try: win.addstr(8, 2, "No updates or history yet. Press C to check for updates.",
                         curses.color_pair(C_DIM))
         except: pass
         return
-    visible = h - 8
+    visible = h - 9
     for i, r in enumerate(rows[scroll:scroll+visible]):
-        y = 6 + i
+        y = 7 + i
         idx = scroll + i
         img = r.get("image","")[:40]
         if r["kind"] == "update":
@@ -2605,6 +2894,117 @@ UPDATES_ACTIONS = [
     ("Pull all available updates",        "upd_pull_all"),
     ("View update cache",                 "upd_view_cache"),
 ]
+
+# ── Settings editor (edit any config option: toggle / type, auto-saves) ───────
+SETTINGS_CONF = os.path.join(CONF_DIR, "stacks.conf")
+
+def _settings_reverse_map():
+    """internal KEY -> (friendly_yaml_key, kind) so edits mirror into stacks.yaml.
+    kind is 'scalar' or 'list'."""
+    rev = {}
+    try:
+        import sys as _s
+        if "/usr/local/lib" not in _s.path: _s.path.insert(0, "/usr/local/lib")
+        import stacks_config as _sc
+        for fk, ik in _sc.SCALAR_MAP.items():
+            rev[ik] = (fk, "scalar")
+        for fk, (ik, _join) in _sc.LIST_MAP.items():
+            rev[ik] = (fk, "list")
+    except Exception:
+        pass
+    return rev
+
+def get_settings_items():
+    """Parse stacks.conf into an ordered list of (key, value, description).
+    The '# comment' line directly above a KEY=VALUE is taken as its description."""
+    items = []
+    desc = ""
+    try:
+        for raw in open(SETTINGS_CONF, encoding="utf-8", errors="replace"):
+            s = raw.strip()
+            if not s:
+                continue
+            if s.startswith("#"):
+                desc = s.lstrip("#").strip()
+                continue
+            if "=" in s:
+                k, v = s.split("=", 1)
+                k = k.strip(); v = v.strip().strip('"').strip("'")
+                items.append((k, v, desc))
+                desc = ""
+    except Exception:
+        pass
+    return items
+
+def _settings_save(key, value):
+    """Write key=value into stacks.conf in place, then mirror to stacks.yaml when
+    the key has a friendly mapping (so bash + the python tools stay in sync)."""
+    # 1) stacks.conf — update in place, preserving comments/order
+    try:
+        lines = open(SETTINGS_CONF, encoding="utf-8", errors="replace").read().split("\n")
+        out = []; found = False
+        for l in lines:
+            st = l.strip()
+            if st and not st.startswith("#") and "=" in st and st.split("=", 1)[0].strip() == key:
+                qv = value
+                if value and any(c in value for c in " \t#") and not (value.startswith('"') and value.endswith('"')):
+                    qv = f'"{value}"'
+                out.append(f"{key}={qv}"); found = True
+            else:
+                out.append(l)
+        if not found:
+            out.append(f"{key}={value}")
+        open(SETTINGS_CONF, "w", encoding="utf-8").write("\n".join(out))
+    except Exception:
+        pass
+    # 2) stacks.yaml overlay — only for mapped keys
+    rev = _settings_reverse_map()
+    if key in rev:
+        fk, kind = rev[key]
+        try:
+            import sys as _s
+            if "/usr/local/lib" not in _s.path: _s.path.insert(0, "/usr/local/lib")
+            import stacks_config as _sc
+            if kind == "scalar":
+                _sc.yaml_set_scalar(fk, value)
+            else:
+                join = _sc.LIST_MAP[fk][1]
+                sep = r"[,\s]+" if join == "," else r"\s+"
+                parts = [p for p in re.split(sep, value) if p]
+                _sc.yaml_set_list(fk, parts)
+        except Exception:
+            pass
+
+def draw_settings_tab(win, h, w, sel, scroll):
+    try:
+        win.addstr(4, 2, "SETTINGS — ENTER toggles a switch or edits a value (auto-saves)",
+                   curses.color_pair(C_ACCENT))
+        win.addstr(5, 2, "─" * (w-4), curses.color_pair(C_DIM))
+    except: pass
+    items = get_settings_items()
+    if not items:
+        try: win.addstr(7, 2, "No settings found in stacks.conf.", curses.color_pair(C_DIM))
+        except: pass
+        return
+    visible = h - 9
+    for i, (key, val, desc) in enumerate(items[scroll:scroll+visible]):
+        y = 6 + i
+        idx = scroll + i
+        is_bool = val in ("0", "1")
+        shown = ("● ON " if val == "1" else "○ OFF") if is_bool else (val[:24] if val else "—")
+        if idx == sel:
+            line = f"{key:<30} {shown:<26} {desc}"
+            try: win.addstr(y, 2, ("▶ " + line)[:w-4], curses.color_pair(C_SELECTED))
+            except: pass
+        else:
+            try:
+                win.addstr(y, 2, f"  {key:<30} ", curses.color_pair(C_NORMAL))
+                vc = (C_GREEN if val == "1" else C_DIM) if is_bool else C_CYAN
+                win.addstr(y, 34, f"{shown:<26} ", curses.color_pair(vc))
+                win.addstr(y, 61, desc[:max(0, w-63)], curses.color_pair(C_DIM))
+            except: pass
+    try: win.addstr(h-2, 2, f"{sel+1}/{len(items)}", curses.color_pair(C_DIM))
+    except: pass
 
 # ── Main TUI ─────────────────────────────────────────────────────────────────
 def main(stdscr):
@@ -2651,15 +3051,16 @@ def main(stdscr):
     FILTERABLE = (0, 1, 9)
 
     FOOTER_HINTS = {
-        0: ['↑↓ Nav', 'a-z Jump', '/ Search', '↔ Tab', 'ENTER Action', 'Q Quit'],
-        1: ['↑↓ Nav', 'a-z Jump', '/ Search', '↔ Tab', 'ENTER Action', 'A All-Stacks', 'Q Quit'],
+        0: ['↑↓ Nav', '←→ Tabs', 'a-z Jump', '/ Search', 'ENTER/TAB Menu', 'Q Quit'],
+        1: ['↑↓ Nav', '←→ Tabs', 'a-z Jump', '/ Search', 'ENTER/TAB Menu', 'A All-Stacks', 'Q Quit'],
         2: ['↑↓ Select', '↔ Tab', 'ENTER Open', 'Q Quit'],
         3: ['↑↓ Select', '↔ Tab', 'ENTER Edit', 'A Inject Art', 'Q Quit'],
         4: ['I Inject All', 'S Strip All', 'D Dyn Inject', 'X Dyn Strip', 'E Edit Art Conf', 'Q Quit'],
         6: ['↑↓ Navigate', 'ENTER Select', 'Q Quit'],
         7: ['↑↓ Navigate', '↔ Switch Tab', 'ENTER Edit', 'Q Quit'],
-        8: ['A Edit', 'S Scan', 'E Edit YAML', '↔ Tab', 'Q Quit'],
+        8: ['A Edit', 'S Scan', 'D Dedupe', 'E Edit YAML', '↔ Tab', 'Q Quit'],
         9: ['↑↓ Nav', 'a-z Jump', '/ Search', 'ENTER Detail', 'C Check', 'F Force', 'P Pull', 'Q Quit'],
+        10: ['↑↓ Nav', 'ENTER Toggle/Edit', '↔ Tab', 'Q Quit'],
     }
 
     while True:
@@ -2671,7 +3072,7 @@ def main(stdscr):
         with data_lock:
             nc = len(app_data['containers'])
             nr = sum(1 for c in app_data['containers'] if c.get('state','').lower()=='running')
-        title = f'  ✦ STACKSSTACKS  ·  {nr}/{nc} running  ·  {now}  '
+        title = f'  ✦ STACKS  ·  {nr}/{nc} running  ·  {now}  '
         draw_header(stdscr, title, w)
         with open("/tmp/tab_live.txt","w") as _f: _f.write(f"tab={tab} {TABS[tab] if tab < len(TABS) else chr(63)}\n")
         with open("/tmp/tab_live.txt","w") as _f: _f.write(f"tab={tab} {TABS[tab] if tab < len(TABS) else chr(63)}\n")
@@ -2702,13 +3103,13 @@ def main(stdscr):
                 [lambda r: r.get('image',''), lambda r: r.get('event','')], flt_letter, flt_inline)
             flt_shown = len(update_rows)
 
-        # Tabs + filter bar / divider
+        # Tabs, then a full-width line under the tab row (splits the tabs from
+        # the A–Z / column-header bands below), then the A–Z filter bar.
         draw_tabs(stdscr, 1, w, TABS, tab)
+        try: stdscr.addstr(2, 0, "─" * (w-1), curses.color_pair(C_DIM))
+        except curses.error: pass
         if tab in FILTERABLE:
-            draw_filter_bar(stdscr, 2, w, flt_letter, flt_inline, flt_mode, flt_shown, flt_total)
-        else:
-            try: stdscr.addstr(2, 0, "─" * (w-1), curses.color_pair(C_DIM))
-            except curses.error: pass
+            draw_filter_bar(stdscr, 3, w, flt_letter, flt_inline, flt_mode, flt_shown, flt_total)
 
         if tab == 0:
             if sel >= len(containers): sel = max(0, len(containers)-1)
@@ -2733,6 +3134,8 @@ def main(stdscr):
         elif tab == 9:
             if sel >= len(update_rows): sel = max(0, len(update_rows)-1)
             draw_updates_tab(stdscr, h, w, update_rows, update_summary, sel, scroll)
+        elif tab == 10:
+            draw_settings_tab(stdscr, h, w, sel, scroll)
 
         draw_footer(stdscr, h, w, FOOTER_HINTS.get(tab, []))
         stdscr.refresh()
@@ -2788,14 +3191,14 @@ def main(stdscr):
             pass
         elif tab == 0:  # Containers
             items = containers
-            vis = h - 7
+            vis = h - 8
             if k == curses.KEY_UP:
                 if sel > 0: sel -= 1
                 if sel < scroll: scroll = sel
             elif k == curses.KEY_DOWN:
                 if sel < len(items)-1: sel += 1
                 if sel >= scroll + vis: scroll = sel - vis + 1
-            elif k in (10, 13) and items:
+            elif k in (9, 10, 13) and items:   # ENTER or TAB → action menu
                 c = items[sel]
                 cname = c.get('name','')
                 # Find which stack this container belongs to
@@ -2815,14 +3218,14 @@ def main(stdscr):
 
         elif tab == 1:  # Stacks
             items = stacks
-            vis = h - 7
+            vis = h - 8
             if k == curses.KEY_UP:
                 if sel > 0: sel -= 1
                 if sel < scroll: scroll = sel
             elif k == curses.KEY_DOWN:
                 if sel < len(items)-1: sel += 1
                 if sel >= scroll + vis: scroll = sel - vis + 1
-            elif k in (10, 13) and items:
+            elif k in (9, 10, 13) and items:   # ENTER or TAB → action menu
                 s = items[sel]
                 result = run_popup_action(stdscr,
                     f'Stack: {s["name"][:20]}', STACK_ACTIONS)
@@ -2907,7 +3310,7 @@ def main(stdscr):
                     run_log_popup(stdscr, 'Art inject dynamics', f'{STACKS_BIN} art dynamic inject all')
                 elif action == 'art_strip_dyn':
                     run_log_popup(stdscr, 'Art strip dynamics', f'{STACKS_BIN} art dynamic strip all')
-                elif action == 'edit_art':
+                elif action == 'edit_stacksart':
                     curses.endwin()
                     os.system(f'{os.environ.get("EDITOR","nano")} {CONF_DIR}/art.conf')
                     stdscr=curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
@@ -2988,6 +3391,33 @@ def main(stdscr):
                 os.system(f'{os.environ.get("EDITOR","nano")} {os.path.expanduser("~/.config/stacks/stacks.yaml")}')
                 stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
                 _net_cache["data"] = None
+            elif k in (ord("d"), ord("D")):
+                # Dedupe: resolve duplicate container_names across stacks
+                import importlib as _il, stacks_dedupe as _dd
+                _il.reload(_dd)
+                dups = _dd.duplicates()
+                if not dups:
+                    run_log_popup(stdscr, "Dedupe", 'echo "✓ No duplicate container_names across stacks."')
+                else:
+                    n_fixed = 0
+                    for cn in sorted(dups):
+                        locs = dups[cn]
+                        keep, why = _dd.recommend_keeper(cn, locs)
+                        acts = []
+                        for l in locs:
+                            star = "  ★ keep" if l["stack"] == keep else ""
+                            acts.append((f'{l["stack"]:<12} svc:{l["service"]}{star}', l["stack"]))
+                        acts.append(("⏭  Skip this one", "__skip__"))
+                        res = run_popup_action(stdscr, f"'{cn}' — keep in? ({why})", acts)
+                        if res and res[1] and res[1] != "__skip__":
+                            for ok, _msg, _bak in _dd.keep_in(cn, res[1]):
+                                if ok: n_fixed += 1
+                    _net_cache["data"] = None
+                    run_log_popup(stdscr, "Dedupe — done",
+                        f'echo "Removed {n_fixed} duplicate block(s)."; '
+                        f'echo "Backups: ~/.config/stacks/dedupe-backups"; '
+                        f'echo "Run a stack up to apply the cleaned files."')
+                stdscr.clear()
         elif tab == 9:  # Updates  (lowercase letters are the letter-jump filter)
             items = update_rows
             vis = h - 8
@@ -3022,6 +3452,25 @@ def main(stdscr):
                     stdscr = curses.initscr(); init_colors(); curses.curs_set(0); stdscr.clear()
                 init_colors()
                 curses.curs_set(0)
+                stdscr.clear()
+        elif tab == 10:  # Settings (edit config option)
+            set_items = get_settings_items()
+            vis = h - 8
+            if k == curses.KEY_UP:
+                if sel > 0: sel -= 1
+                if sel < scroll: scroll = sel
+            elif k == curses.KEY_DOWN:
+                if sel < len(set_items)-1: sel += 1
+                if sel >= scroll + vis: scroll = sel - vis + 1
+            elif k in (10, 13) and set_items:
+                s_key, s_val, s_desc = set_items[sel]
+                if s_val in ("0", "1"):
+                    _settings_save(s_key, "0" if s_val == "1" else "1")
+                else:
+                    nv = _prompt_text(stdscr, f"Edit {s_key}",
+                                      (s_desc[:46] or "Value:"), s_val, cancel_val=None)
+                    if nv is not None and nv != s_val:
+                        _settings_save(s_key, nv)
                 stdscr.clear()
 
 def run():
